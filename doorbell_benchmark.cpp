@@ -1,8 +1,8 @@
 // doorbell_benchmark.cpp — Compare 64-byte doorbell writes on specific NUMA nodes
 //
 // Build (GCC ≥ 12 or Clang ≥ 15):
-//   g++ -O3 -std=c++20 -march=native -mavx512f -mavx512bw -mclflushopt -mmovdir64b \
-//       doorbell_benchmark.cpp -o doorbell_bench -lnuma
+//   g++ -O3 -std=c++20 -march=native -mavx512f -mavx512bw \
+//       -mclflushopt -mclwb -mmovdir64b doorbell_benchmark.cpp -o doorbell_bench -lnuma
 //
 // Usage examples:
 //   sudo ./doorbell_bench            # run on node 0 only, 1 M iterations
@@ -11,7 +11,7 @@
 // Notes
 // • Requires libnuma for node-local allocation.
 // • MOVDIR64B needs Sapphire Rapids (or newer) *and* Linux ≥ 5.12 with user-mode
-//   enablement.  Run as root so the program can pin the thread and read the TSC.
+//   enablement. Run as root so the program can pin the thread and read the TSC.
 //
 #include <immintrin.h>
 #include <x86intrin.h>
@@ -29,8 +29,10 @@
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
-static inline void clflush_opt(void *p) { _mm_clflushopt(p); }
-static inline void sfence()             { _mm_sfence(); }
+static inline void clflush(void *p)      { _mm_clflush(p);  }
+static inline void clflush_opt(void *p)  { _mm_clflushopt(p); }
+static inline void clwb(void *p)         { _mm_clwb(p);     }
+static inline void sfence()              { _mm_sfence();    }
 
 static inline bool has_movdir64b() {
     unsigned int eax, ebx, ecx, edx;
@@ -72,15 +74,19 @@ static void pin_to_cpu0() {
 // Benchmark
 // -----------------------------------------------------------------------------
 enum class OpType : uint8_t {
-    STREAM_FLUSH_SINGLE,
-    NT_ONLY_SINGLE,
-    NT_ONLY_WITH_CHECKSUM_SINGLE,   // new
-    NT_WITH_FLAG_SINGLE,
-    MOVDIR_SINGLE,
-    MOVDIR_WITH_CHECKSUM_SINGLE,    // new
-    STREAM_FLUSH_DOUBLE,
-    NT_ONLY_DOUBLE,
-    NT_WITH_FLAG_DOUBLE,
+    REG_CLFLUSH_SINGLE,        // 64 B regular store + CLFLUSH
+    REG_CLFLUSHOPT_SINGLE,     // 64 B regular store + CLFLUSHOPT
+    REG_CLWB_SINGLE,           // 64 B regular store + CLWB
+    SCALAR8_CLWB_SINGLE,       // 8 × 8 B scalar stores + CLWB
+    NT_STREAM_SINGLE,          // 64 B non-temporal stream store
+    NT_STREAM_CHECKSUM_SINGLE, // NT + checksum
+    NT_STREAM_FLAG_SINGLE,     // NT + flag write
+    MOVDIR_SINGLE,             // MOVDIR64B
+    MOVDIR_CHECKSUM_SINGLE,    // MOVDIR64B + checksum
+    // ───── double-line (64 B × 2) variants ─────────────────────────────────
+    REG_CLFLUSHOPT_DOUBLE,
+    NT_STREAM_DOUBLE,
+    NT_STREAM_FLAG_DOUBLE,
     MOVDIR_DOUBLE
 };
 
@@ -95,26 +101,30 @@ constexpr size_t kIters = 1'000'000;
 constexpr size_t kLine  = 64;
 
 void benchmark_node(int node, std::vector<Result>& out) {
-    alignas(64) uint8_t src[kLine] = {0};      // keep src[63] = 0 for hashing
+    alignas(64) uint8_t src[kLine] = {0};              // keep src[63] = 0 for hashing
     size_t      buf_sz = kLine * 2;
     uint8_t    *dst    = static_cast<uint8_t*>(numa_alloc_onnode(buf_sz, node));
     if (!dst) { perror("numa_alloc_onnode"); std::exit(EXIT_FAILURE); }
     memset(dst, 0, buf_sz);  uint8_t *dst2 = dst + kLine;
 
     for (OpType op : {
-            OpType::STREAM_FLUSH_SINGLE,
-            OpType::NT_ONLY_SINGLE,
-            OpType::NT_ONLY_WITH_CHECKSUM_SINGLE,
-            OpType::NT_WITH_FLAG_SINGLE,
+            OpType::REG_CLFLUSH_SINGLE,
+            OpType::REG_CLFLUSHOPT_SINGLE,
+            OpType::REG_CLWB_SINGLE,
+            OpType::SCALAR8_CLWB_SINGLE,
+            OpType::NT_STREAM_SINGLE,
+            OpType::NT_STREAM_CHECKSUM_SINGLE,
+            OpType::NT_STREAM_FLAG_SINGLE,
             OpType::MOVDIR_SINGLE,
-            OpType::MOVDIR_WITH_CHECKSUM_SINGLE,
-            OpType::STREAM_FLUSH_DOUBLE,
-            OpType::NT_ONLY_DOUBLE,
-            OpType::NT_WITH_FLAG_DOUBLE,
+            OpType::MOVDIR_CHECKSUM_SINGLE,
+            // double-line group
+            OpType::REG_CLFLUSHOPT_DOUBLE,
+            OpType::NT_STREAM_DOUBLE,
+            OpType::NT_STREAM_FLAG_DOUBLE,
             OpType::MOVDIR_DOUBLE }) {
 
-        if ((op == OpType::MOVDIR_SINGLE      ||
-             op == OpType::MOVDIR_WITH_CHECKSUM_SINGLE ||
+        if ((op == OpType::MOVDIR_SINGLE ||
+             op == OpType::MOVDIR_CHECKSUM_SINGLE ||
              op == OpType::MOVDIR_DOUBLE) && !has_movdir64b()) {
             std::cerr << "[WARN] CPU lacks MOVDIR64B — skipping\n";
             continue;
@@ -123,18 +133,36 @@ void benchmark_node(int node, std::vector<Result>& out) {
         uint64_t t0 = __rdtsc();
         for (size_t i = 0; i < kIters; ++i) {
             switch (op) {
-                // ─── single-line variants ─────────────────────────────
-                case OpType::STREAM_FLUSH_SINGLE:
+                // ─── single-line variants ──────────────────────────────
+                case OpType::REG_CLFLUSH_SINGLE:
+                    _mm512_store_si512(reinterpret_cast<__m512i*>(dst),
+                                       *reinterpret_cast<const __m512i*>(src));
+                    clflush(dst); sfence(); break;
+
+                case OpType::REG_CLFLUSHOPT_SINGLE:
                     _mm512_store_si512(reinterpret_cast<__m512i*>(dst),
                                        *reinterpret_cast<const __m512i*>(src));
                     clflush_opt(dst); sfence(); break;
 
-                case OpType::NT_ONLY_SINGLE:
+                case OpType::REG_CLWB_SINGLE:
+                    _mm512_store_si512(reinterpret_cast<__m512i*>(dst),
+                                       *reinterpret_cast<const __m512i*>(src));
+                    clwb(dst); sfence(); break;
+
+                case OpType::SCALAR8_CLWB_SINGLE: {
+                    const uint64_t *s64 = reinterpret_cast<const uint64_t*>(src);
+                    uint64_t       *d64 = reinterpret_cast<uint64_t*>(dst);
+#pragma unroll
+                    for (int j = 0; j < 8; ++j) d64[j] = s64[j];
+                    clwb(dst); sfence(); break;
+                }
+
+                case OpType::NT_STREAM_SINGLE:
                     _mm512_stream_si512(reinterpret_cast<__m512i*>(dst),
                                         *reinterpret_cast<const __m512i*>(src));
                     sfence(); break;
 
-                case OpType::NT_ONLY_WITH_CHECKSUM_SINGLE: {
+                case OpType::NT_STREAM_CHECKSUM_SINGLE: {
                     uint8_t chk = xor_checksum63(src);
                     src[63] = chk;
                     _mm512_stream_si512(reinterpret_cast<__m512i*>(dst),
@@ -142,7 +170,7 @@ void benchmark_node(int node, std::vector<Result>& out) {
                     sfence();  src[63] = 0; break;
                 }
 
-                case OpType::NT_WITH_FLAG_SINGLE:
+                case OpType::NT_STREAM_FLAG_SINGLE:
                     _mm512_stream_si512(reinterpret_cast<__m512i*>(dst),
                                         *reinterpret_cast<const __m512i*>(src));
                     sfence();
@@ -150,32 +178,30 @@ void benchmark_node(int node, std::vector<Result>& out) {
                     sfence(); break;
 
                 case OpType::MOVDIR_SINGLE:
-                    movdir64b(dst, src);
-                    sfence(); break;
+                    movdir64b(dst, src); sfence(); break;
 
-                case OpType::MOVDIR_WITH_CHECKSUM_SINGLE: {
+                case OpType::MOVDIR_CHECKSUM_SINGLE: {
                     uint8_t chk = xor_checksum63(src);
                     src[63] = chk;
-                    movdir64b(dst, src);
-                    sfence();  src[63] = 0; break;
+                    movdir64b(dst, src); sfence();  src[63] = 0; break;
                 }
 
-                // ─── double-line variants (unchanged) ─────────────────
-                case OpType::STREAM_FLUSH_DOUBLE:
+                // ─── double-line variants ──────────────────────────────
+                case OpType::REG_CLFLUSHOPT_DOUBLE:
                     _mm512_store_si512(reinterpret_cast<__m512i*>(dst),
                                        *reinterpret_cast<const __m512i*>(src));
                     _mm512_store_si512(reinterpret_cast<__m512i*>(dst2),
                                        *reinterpret_cast<const __m512i*>(src));
                     clflush_opt(dst); clflush_opt(dst2); sfence(); break;
 
-                case OpType::NT_ONLY_DOUBLE:
+                case OpType::NT_STREAM_DOUBLE:
                     _mm512_stream_si512(reinterpret_cast<__m512i*>(dst),
                                         *reinterpret_cast<const __m512i*>(src));
                     _mm512_stream_si512(reinterpret_cast<__m512i*>(dst2),
                                         *reinterpret_cast<const __m512i*>(src));
                     sfence(); break;
 
-                case OpType::NT_WITH_FLAG_DOUBLE:
+                case OpType::NT_STREAM_FLAG_DOUBLE:
                     _mm512_stream_si512(reinterpret_cast<__m512i*>(dst),
                                         *reinterpret_cast<const __m512i*>(src));
                     _mm512_stream_si512(reinterpret_cast<__m512i*>(dst2),
@@ -214,22 +240,38 @@ int main(int argc, char **argv) {
 
     double ghz = rdtsc_ghz();
     std::cout << "Per-operation latency (" << kIters << " iterations, averages)\n";
-    std::cout << "Node  Op                       Cycles   ns\n";
+    std::cout << "Node  Operation                                   Cycles      ns\n";
+
+    bool prev_double = false;
     for (auto &r : results) {
         r.ns = r.cycles / ghz;
+
         const char *name =
-            (r.op == OpType::STREAM_FLUSH_SINGLE)          ? "stream+flush_1"  :
-            (r.op == OpType::NT_ONLY_SINGLE)               ? "nt_1"            :
-            (r.op == OpType::NT_ONLY_WITH_CHECKSUM_SINGLE) ? "nt+chk_1"        :
-            (r.op == OpType::NT_WITH_FLAG_SINGLE)          ? "nt+flag_1"       :
-            (r.op == OpType::MOVDIR_SINGLE)                ? "movdir_1"        :
-            (r.op == OpType::MOVDIR_WITH_CHECKSUM_SINGLE)  ? "movdir+chk_1"    :
-            (r.op == OpType::STREAM_FLUSH_DOUBLE)          ? "stream+flush_2"  :
-            (r.op == OpType::NT_ONLY_DOUBLE)               ? "nt_2"            :
-            (r.op == OpType::NT_WITH_FLAG_DOUBLE)          ? "nt+flag_2"       :
-                                                             "movdir_2";
-        std::cout << "  " << r.node << "   " << std::left << std::setw(20)
-                  << name << "  " << std::setw(8) << r.cycles << "  "
+            (r.op == OpType::REG_CLFLUSH_SINGLE)        ? "64B_regular_store+clflush"               :
+            (r.op == OpType::REG_CLFLUSHOPT_SINGLE)     ? "64B_regular_store+clflushopt"            :
+            (r.op == OpType::REG_CLWB_SINGLE)           ? "64B_regular_store+clwb"                  :
+            (r.op == OpType::SCALAR8_CLWB_SINGLE)       ? "8x8B_scalar_store+clwb"                  :
+            (r.op == OpType::NT_STREAM_SINGLE)          ? "64B_stream_nt"                           :
+            (r.op == OpType::NT_STREAM_CHECKSUM_SINGLE) ? "64B_stream_nt+checksum"                  :
+            (r.op == OpType::NT_STREAM_FLAG_SINGLE)     ? "64B_stream_nt+flag"                      :
+            (r.op == OpType::MOVDIR_SINGLE)             ? "movdir64B"                               :
+            (r.op == OpType::MOVDIR_CHECKSUM_SINGLE)    ? "movdir64B+checksum"                      :
+            (r.op == OpType::REG_CLFLUSHOPT_DOUBLE)     ? "2x64B_regular_store+clflushopt"          :
+            (r.op == OpType::NT_STREAM_DOUBLE)          ? "2x64B_stream_nt"                         :
+            (r.op == OpType::NT_STREAM_FLAG_DOUBLE)     ? "2x64B_stream_nt+flag"                    :
+            (r.op == OpType::MOVDIR_DOUBLE)             ? "2xmovdir64B"                             :
+                                                         "unknown";
+
+        bool is_double = (r.op == OpType::REG_CLFLUSHOPT_DOUBLE) ||
+                         (r.op == OpType::NT_STREAM_DOUBLE)      ||
+                         (r.op == OpType::NT_STREAM_FLAG_DOUBLE) ||
+                         (r.op == OpType::MOVDIR_DOUBLE);
+
+        if (is_double && !prev_double) std::cout << '\n';   // blank line before first “_2” group
+        prev_double = is_double;
+
+        std::cout << "  " << r.node << "   " << std::left << std::setw(40)
+                  << name << "  " << std::setw(10) << r.cycles << "  "
                   << std::fixed << std::setprecision(2) << r.ns << '\n';
     }
     return 0;
