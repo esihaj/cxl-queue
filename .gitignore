@@ -1,0 +1,24 @@
+# Ignore build artifacts
+doorbell_bench
+cxl_mpsc_queue
+test_mpsc_queue
+cxl_ping_pong
+
+# Ignore common temporary or backup files
+*.o
+*.out
+*.log
+*.tmp
+*~
+
+# Ignore core dumps
+core
+
+# Ignore OS-specific files
+.DS_Store
+
+# Ignore editor files
+.vscode/
+*.swp
+*.swo
+.idea/
