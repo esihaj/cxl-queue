@@ -1,35 +1,49 @@
-# ---------------------------------------------------------------------------
-#  Makefile: doorbell_bench  ⟷  cxl_mpsc_queue
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+#  Makefile
+#    • doorbell_bench        – micro-benchmark for doorbell queue
+#    • cxl_mpsc_queue        – benchmark / demo for CXL-resident MPSC queue
+#    • test_mpsc_queue       – unit-tests (SPSC focus) in test_mpsc_queue.cpp
+#    • cxl_ping_pong         – ping-pong latency benchmark
+# ─────────────────────────────────────────────────────────────────────────────
 
 CXX := g++
 
 # ---------------------------------------------------------------------------
-#  Shared options
+#  Common flags
 # ---------------------------------------------------------------------------
-STD      := -std=c++20
-OPT      := -O3 -march=native
-LDFLAGS  := -lnuma
+STD        := -std=c++20
+OPT        := -O3 -march=native
+THREADING  := -pthread
+LDFLAGS    := -lnuma $(THREADING)
 
 # ---------------------------------------------------------------------------
-#  Target-specific compile flags
+#  ISA-specific flags required by queue implementation
 # ---------------------------------------------------------------------------
-DOORBELL_CXXFLAGS := $(STD) $(OPT) -mavx512f -mavx512bw -mclflushopt -mmovdir64b -pthread
-CXL_CXXFLAGS      := $(STD) $(OPT) -pthread
+ISAFLAGS   := -mavx512f -mavx512bw -mclflushopt -mmovdir64b
+
+CXXFLAGS_COMMON := $(STD) $(OPT) $(THREADING)
+CXXFLAGS_QUEUE  := $(CXXFLAGS_COMMON) $(ISAFLAGS)
 
 # ---------------------------------------------------------------------------
-#  Targets and sources
+#  Targets
 # ---------------------------------------------------------------------------
-TARGETS := doorbell_bench cxl_mpsc_queue
+TARGETS := doorbell_bench cxl_mpsc_queue test_mpsc_queue cxl_ping_pong
+HEADERS := cxl_mpsc_queue.hpp   # ← the queue implementation we want to track
 
 .PHONY: all clean
 all: $(TARGETS)
 
-doorbell_bench: doorbell_benchmark.cpp
-	$(CXX) $(DOORBELL_CXXFLAGS) $< -o $@ $(LDFLAGS)
+doorbell_bench: doorbell_benchmark.cpp $(HEADERS)
+	$(CXX) $(CXXFLAGS_QUEUE) $< -o $@ $(LDFLAGS)
 
-cxl_mpsc_queue: cxl_mpsc_queue.cpp
-	$(CXX) $(CXL_CXXFLAGS) $< -o $@ $(LDFLAGS)
+cxl_mpsc_queue: cxl_mpsc_queue.cpp $(HEADERS)
+	$(CXX) $(CXXFLAGS_QUEUE) $< -o $@ $(LDFLAGS)
+
+test_mpsc_queue: test_mpsc_queue.cpp $(HEADERS)
+	$(CXX) $(CXXFLAGS_QUEUE) $< -o $@ $(LDFLAGS)
+
+cxl_ping_pong: cxl_ping_pong.cpp $(HEADERS)
+	$(CXX) $(CXXFLAGS_QUEUE) $< -o $@ $(LDFLAGS)
 
 clean:
 	rm -f $(TARGETS)
