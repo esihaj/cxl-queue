@@ -12,7 +12,7 @@ CXX := g++
 #  Common flags
 # ---------------------------------------------------------------------------
 STD        := -std=c++20
-OPT        := -O3 -march=native
+OPT        := -O3 -march=native -fno-omit-frame-pointer
 THREADING  := -pthread
 LDFLAGS    := -lnuma $(THREADING)
 
@@ -28,7 +28,7 @@ CXXFLAGS_QUEUE  := $(CXXFLAGS_COMMON) $(ISAFLAGS)
 #  Targets
 # ---------------------------------------------------------------------------
 TARGETS := doorbell_bench cxl_mpsc_queue test_mpsc_queue cxl_ping_pong
-HEADERS := cxl_mpsc_queue.hpp   # ← the queue implementation we want to track
+HEADERS := cxl_allocator.hpp cxl_mpsc_queue.hpp   # ← the queue implementation we want to track
 
 .PHONY: all clean
 all: $(TARGETS)
