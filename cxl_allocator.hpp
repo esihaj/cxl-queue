@@ -158,10 +158,10 @@ public:
         bump_ptr_ = std::make_unique<BumpPtr>(base_addr_, length);
 
         std::ostringstream msg;
-        msg << "DAX mmap ok: path=" << path_
+        msg << "DAX mmap ok: path=" << path_ << std::hex
             << " offset=" << offset_
             << " length=" << length_
-            << " addr=0x" << std::hex << reinterpret_cast<std::uintptr_t>(base_addr_);
+            << " addr=0x" << reinterpret_cast<std::uintptr_t>(base_addr_);
         log(debug_level_, DebugLevel::low, msg.str());
 
     }
