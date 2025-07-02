@@ -1,17 +1,15 @@
 // doorbell_benchmark.cpp — 64-byte door-bell micro-benchmark
 //
-// One allocator is created at program start and reused for all tests.
-// The allocator type is selected by CLI:
+// CLI:
+//   ./doorbell_benchmark pin <cpu_id> dax
+//   ./doorbell_benchmark pin <cpu_id> numa <node_id>
 //
-//   dax               → default /dev/dax1.0 (81-82 GiB slice)
-//   numa <node>       → arena from DRAM on <node>
-//
-// Build (GCC ≥ 12 or Clang ≥ 15)
+// Build (GCC ≥ 12 or Clang ≥ 15):
 //   g++ -O3 -std=c++20 -march=native -mavx512f -mavx512bw \
 //       -mclflushopt -mclwb -mmovdir64b doorbell_benchmark.cpp -o doorbell_bench -lnuma
 // ---------------------------------------------------------------------------
 
-#include "cxl_allocator.hpp"        // allocator header
+#include "cxl_allocator.hpp"
 #include <immintrin.h>
 #include <x86intrin.h>
 #include <cpuid.h>
@@ -19,13 +17,14 @@
 #include <sched.h>
 #include <unistd.h>
 
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
-#include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 /* ─ helpers ────────────────────────────────────────────────────────────── */
@@ -70,10 +69,58 @@ static double rdtsc_ghz()
     return 3.0;     // fallback
 }
 
-static void pin_to_cpu0()
+static void pin_to_cpu(int cpu_id)
 {
-    cpu_set_t s; CPU_ZERO(&s); CPU_SET(0, &s);
-    sched_setaffinity(0, sizeof(s), &s);
+    cpu_set_t s; CPU_ZERO(&s); CPU_SET(cpu_id, &s);
+    if (sched_setaffinity(0, sizeof(s), &s) != 0)
+        std::perror("sched_setaffinity");
+}
+
+/* ─ CLI parsing & config ───────────────────────────────────────────────── */
+struct Config {
+    int                cpu_id    = 0;
+    enum class Mode { dax, numa } mode = Mode::dax;
+    int                numa_node = 0;
+};
+
+[[noreturn]] static void print_usage(const char* prog)
+{
+    std::cerr << "Usage:\n"
+              << "  " << prog << " pin <cpu_id> dax\n"
+              << "  " << prog << " pin <cpu_id> numa <alloc_node>\n";
+    std::exit(EXIT_FAILURE);
+}
+
+static Config parse_cli(int argc, char** argv)
+{
+    if (argc < 4) print_usage(argv[0]);
+    if (std::string{argv[1]} != "pin") print_usage(argv[0]);
+
+    Config cfg;
+    cfg.cpu_id = std::atoi(argv[2]);
+
+    std::string mode = argv[3];
+    if (mode == "dax") {
+        cfg.mode = Config::Mode::dax;
+    } else if (mode == "numa") {
+        if (argc < 5) print_usage(argv[0]);
+        cfg.mode      = Config::Mode::numa;
+        cfg.numa_node = std::atoi(argv[4]);
+    } else {
+        print_usage(argv[0]);
+    }
+    return cfg;
+}
+
+static std::unique_ptr<cxl::CxlAllocator>
+make_allocator(const Config& cfg)
+{
+    constexpr std::size_t arena_size = 64 * 2;   // two cache lines
+    if (cfg.mode == Config::Mode::dax)
+        return std::make_unique<cxl::DaxAllocator>();
+    return std::make_unique<cxl::NumaAllocator>(cfg.numa_node,
+                                                arena_size,
+                                                cxl::DebugLevel::low);
 }
 
 /* ─ benchmark definitions ─────────────────────────────────────────────── */
@@ -94,6 +141,49 @@ enum class OpType : uint8_t {
     MOVDIR_DOUBLE
 };
 
+static const std::vector<OpType>& all_op_types()
+{
+    static const std::vector<OpType> ops = {
+        OpType::REG_CLFLUSH_SINGLE,
+        OpType::REG_CLFLUSHOPT_SINGLE,
+        OpType::REG_CLWB_SINGLE,
+        OpType::SCALAR8_CLWB_SINGLE,
+        OpType::NT_STREAM_SINGLE,
+        OpType::NT_STREAM_CHECKSUM_SINGLE,
+        OpType::NT_STREAM_FLAG_SINGLE,
+        OpType::NT_LOAD_SINGLE,
+        OpType::MOVDIR_SINGLE,
+        OpType::MOVDIR_CHECKSUM_SINGLE,
+        OpType::REG_CLFLUSHOPT_DOUBLE,
+        OpType::NT_STREAM_DOUBLE,
+        OpType::NT_STREAM_FLAG_DOUBLE,
+        OpType::MOVDIR_DOUBLE
+    };
+    return ops;
+}
+
+/* ─ mapping: OpType → string ──────────────────────────────────────────── */
+static const char* op_name(OpType op)
+{
+    switch (op) {
+        case OpType::REG_CLFLUSH_SINGLE:        return "64B_regular_store+clflush";
+        case OpType::REG_CLFLUSHOPT_SINGLE:     return "64B_regular_store+clflushopt";
+        case OpType::REG_CLWB_SINGLE:           return "64B_regular_store+clwb";
+        case OpType::SCALAR8_CLWB_SINGLE:       return "8x8B_scalar_store+clwb";
+        case OpType::NT_STREAM_SINGLE:          return "64B_non_temporal_stream";
+        case OpType::NT_STREAM_CHECKSUM_SINGLE: return "64B_non_temporal_stream+checksum";
+        case OpType::NT_STREAM_FLAG_SINGLE:     return "64B_non_temporal_stream+flag";
+        case OpType::NT_LOAD_SINGLE:            return "64B_non_temporal_stream_load";
+        case OpType::MOVDIR_SINGLE:             return "movdir64B";
+        case OpType::MOVDIR_CHECKSUM_SINGLE:    return "movdir64B+checksum";
+        case OpType::REG_CLFLUSHOPT_DOUBLE:     return "2x64B_regular_store+clflushopt";
+        case OpType::NT_STREAM_DOUBLE:          return "2x64B_non_temporal_stream";
+        case OpType::NT_STREAM_FLAG_DOUBLE:     return "2x64B_non_temporal_stream+flag";
+        case OpType::MOVDIR_DOUBLE:             return "2xmovdir64B";
+        default:                                return "unknown";
+    }
+}
+
 struct Result {
     OpType   op;
     uint64_t cycles;
@@ -102,11 +192,10 @@ struct Result {
 
 constexpr std::size_t k_iters = 1'000'000;
 constexpr std::size_t k_line  = 64;
-
 static uint64_t nt_load_checksum = 0;
 
 /* ─ single benchmark run ──────────────────────────────────────────────── */
-void benchmark(cxl::CxlAllocator& alloc, std::vector<Result>& out)
+static void benchmark(cxl::CxlAllocator& alloc, std::vector<Result>& out)
 {
     alignas(64) uint8_t src[k_line] = {0};
     alignas(64) uint8_t tmp[k_line] = {0};
@@ -114,21 +203,7 @@ void benchmark(cxl::CxlAllocator& alloc, std::vector<Result>& out)
     uint8_t* dst  = static_cast<uint8_t*>(alloc.allocate_aligned(k_line));
     uint8_t* dst2 = static_cast<uint8_t*>(alloc.allocate_aligned(k_line));
 
-    for (OpType op :
-        { OpType::REG_CLFLUSH_SINGLE,
-          OpType::REG_CLFLUSHOPT_SINGLE,
-          OpType::REG_CLWB_SINGLE,
-          OpType::SCALAR8_CLWB_SINGLE,
-          OpType::NT_STREAM_SINGLE,
-          OpType::NT_STREAM_CHECKSUM_SINGLE,
-          OpType::NT_STREAM_FLAG_SINGLE,
-          OpType::NT_LOAD_SINGLE,
-          OpType::MOVDIR_SINGLE,
-          OpType::MOVDIR_CHECKSUM_SINGLE,
-          OpType::REG_CLFLUSHOPT_DOUBLE,
-          OpType::NT_STREAM_DOUBLE,
-          OpType::NT_STREAM_FLAG_DOUBLE,
-          OpType::MOVDIR_DOUBLE })
+    for (OpType op : all_op_types())
     {
         if ((op == OpType::MOVDIR_SINGLE ||
              op == OpType::MOVDIR_CHECKSUM_SINGLE ||
@@ -171,8 +246,8 @@ void benchmark(cxl::CxlAllocator& alloc, std::vector<Result>& out)
 
                 case OpType::NT_STREAM_CHECKSUM_SINGLE: {
                     uint16_t chk = xor_checksum64(src);
-                    src[62] = static_cast<uint8_t>(chk);       // low byte
-                    src[63] = static_cast<uint8_t>(chk >> 8);  // high byte
+                    src[62] = static_cast<uint8_t>(chk);
+                    src[63] = static_cast<uint8_t>(chk >> 8);
                     _mm512_stream_si512(reinterpret_cast<__m512i*>(dst),
                                         *reinterpret_cast<const __m512i*>(src));
                     sfence();
@@ -237,47 +312,24 @@ void benchmark(cxl::CxlAllocator& alloc, std::vector<Result>& out)
         }
         uint64_t avg_cycles = (__rdtsc() - start) / k_iters;
         out.push_back({op, avg_cycles, 0.0});
+
+        /* cool-down */
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 }
 
 /* ─ main ──────────────────────────────────────────────────────────────── */
 int main(int argc, char** argv)
 {
-    auto usage = [prog = argv[0]]() {
-        std::cerr << "Usage:\n"
-                  << "  " << prog << " dax\n"
-                  << "  " << prog << " numa <alloc_node>\n";
-    };
-
     if (numa_available() != 0) {
         std::cerr << "libnuma not available or NUMA disabled by BIOS\n";
         return EXIT_FAILURE;
     }
-    pin_to_cpu0();
 
-    if (argc < 2) {
-        std::cerr << "Error: missing allocator type\n";
-        usage();
-        return EXIT_FAILURE;
-    }
+    Config cfg = parse_cli(argc, argv);
+    pin_to_cpu(cfg.cpu_id);
 
-    std::unique_ptr<cxl::CxlAllocator> allocator;
-    const std::string mode = argv[1];
-
-    if (mode == "dax") {
-        allocator = std::make_unique<cxl::DaxAllocator>();
-    } else if (mode == "numa") {
-        if (argc < 3) { std::cerr << "Error: missing NUMA node\n"; usage(); return EXIT_FAILURE; }
-        int alloc_node = std::atoi(argv[2]);
-        std::size_t arena_size = k_line * 2;              // two cache lines
-        allocator = std::make_unique<cxl::NumaAllocator>(alloc_node, arena_size,
-                                                         cxl::DebugLevel::low);
-    } else {
-        std::cerr << "Error: unknown allocator type '" << mode << "'\n";
-        usage();
-        return EXIT_FAILURE;
-    }
-
+    auto allocator = make_allocator(cfg);
     if (!allocator->test_memory()) {
         std::cerr << "Allocator self-test failed\n";
         return EXIT_FAILURE;
@@ -297,22 +349,7 @@ int main(int argc, char** argv)
     for (auto& r : results) {
         r.ns = r.cycles / ghz;
 
-        const char* name =
-            (r.op == OpType::REG_CLFLUSH_SINGLE)        ? "64B_regular_store+clflush"               :
-            (r.op == OpType::REG_CLFLUSHOPT_SINGLE)     ? "64B_regular_store+clflushopt"            :
-            (r.op == OpType::REG_CLWB_SINGLE)           ? "64B_regular_store+clwb"                  :
-            (r.op == OpType::SCALAR8_CLWB_SINGLE)       ? "8x8B_scalar_store+clwb"                  :
-            (r.op == OpType::NT_STREAM_SINGLE)          ? "64B_non_temporal_stream"                 :
-            (r.op == OpType::NT_STREAM_CHECKSUM_SINGLE) ? "64B_non_temporal_stream+checksum"        :
-            (r.op == OpType::NT_STREAM_FLAG_SINGLE)     ? "64B_non_temporal_stream+flag"            :
-            (r.op == OpType::NT_LOAD_SINGLE)            ? "64B_non_temporal_stream_load"            :
-            (r.op == OpType::MOVDIR_SINGLE)             ? "movdir64B"                               :
-            (r.op == OpType::MOVDIR_CHECKSUM_SINGLE)    ? "movdir64B+checksum"                      :
-            (r.op == OpType::REG_CLFLUSHOPT_DOUBLE)     ? "2x64B_regular_store+clflushopt"          :
-            (r.op == OpType::NT_STREAM_DOUBLE)          ? "2x64B_non_temporal_stream"               :
-            (r.op == OpType::NT_STREAM_FLAG_DOUBLE)     ? "2x64B_non_temporal_stream+flag"          :
-            (r.op == OpType::MOVDIR_DOUBLE)             ? "2xmovdir64B"                             :
-                                                           "unknown";
+        const char* name = op_name(r.op);
 
         bool is_double =
             (r.op == OpType::REG_CLFLUSHOPT_DOUBLE) ||
@@ -328,7 +365,7 @@ int main(int argc, char** argv)
                   << std::fixed << std::setprecision(2) << r.ns << '\n';
     }
 
-    std::cout << "\n  nt_load_checksum (ignore. Just to prevent compiler optimizations): " << nt_load_checksum << '\n';
-    
+    std::cout << "\n  nt_load_checksum (ignore. Just to prevent compiler optimizations): "
+              << nt_load_checksum << '\n';
     return 0;
 }
