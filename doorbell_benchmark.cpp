@@ -190,7 +190,7 @@ struct Result {
     double   ns;
 };
 
-constexpr std::size_t k_iters = 1'000'000;
+constexpr std::size_t k_iters = 5'000'000;
 constexpr std::size_t k_line  = 64;
 static uint64_t nt_load_checksum = 0;
 
