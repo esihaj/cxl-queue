@@ -7,6 +7,7 @@ cxl_ping_pong
 perf.data
 
 # Ignore common temporary or backup files
+*.s
 *.o
 *.out
 *.log
