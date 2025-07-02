@@ -4,6 +4,8 @@ cxl_mpsc_queue
 test_mpsc_queue
 cxl_ping_pong
 
+perf.data
+
 # Ignore common temporary or backup files
 *.o
 *.out
