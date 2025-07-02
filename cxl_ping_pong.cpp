@@ -79,6 +79,7 @@ int main(int argc, char* argv[])
     std::cout << "Client pinned to CPU " << client_cpu << '\n';
     std::cout << "Iterations           : " << iters << '\n';
 
+
     const size_t cap = 1u << ORDER;
 
     // ───── allocate queue memory via CXL allocator ───────────────────────
@@ -151,10 +152,18 @@ int main(int argc, char* argv[])
     const double total_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
     const double rtt_ns   = total_ns / static_cast<double>(iters);
 
+    const long total_memory_access = q_req.get_metrics().enqueue_calls.load() +
+                                      q_req.get_metrics().dequeue_calls.load() +
+                                      q_rsp.get_metrics().enqueue_calls.load() +
+                                      q_rsp.get_metrics().dequeue_calls.load();
+
+    std::cout << "Memory accesses      : " << total_memory_access << '\n';
+
     std::cout << std::fixed << std::setprecision(2);
     std::cout << "\nTotal elapsed (ms)   : " << total_ns / 1e6  << '\n'
               << "Round-trip latency/ns: " << rtt_ns           << '\n'
-              << "One-way latency/ns   : " << rtt_ns / 2.0     << '\n';
+              << "One-way latency/ns   : " << rtt_ns / 2.0     << '\n'
+              << "Memory time/ns     : "  << total_ns / total_memory_access << '\n';
 
     std::cout << "\n[queue stats]\n";
     q_req.print_metrics("request");
