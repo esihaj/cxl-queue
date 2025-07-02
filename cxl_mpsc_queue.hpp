@@ -185,6 +185,11 @@ public:
         store_nt_u64(cxl_tail_, tail_);
     }
 
+    [[nodiscard]] std::size_t capacity() const noexcept
+    {
+        return static_cast<std::size_t>(1u) << order_;  // 2^order_
+    }
+
     // ────────────────────────────────────────────────────────────────
     //  enqueue
     // ────────────────────────────────────────────────────────────────

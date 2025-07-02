@@ -12,7 +12,7 @@ CXX := g++
 #  Common flags
 # ---------------------------------------------------------------------------
 STD        := -std=c++20
-OPT        := -O3 -march=native -fno-omit-frame-pointer
+OPT        := -O3 -g -march=native -fno-omit-frame-pointer
 THREADING  := -pthread
 LDFLAGS    := -lnuma $(THREADING)
 

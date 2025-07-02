@@ -125,32 +125,49 @@ int main(int argc, char* argv[]) {
     CxlMpscQueue q(ring, ORDER, tail_cxl);
 
     //-----------------------------------------------------------------------
-    //  Producer / Consumer micro-benchmark
+    //  Producer / Consumer micro-benchmark with warm-up
     //-----------------------------------------------------------------------
-    std::atomic<bool>   done{false};
-    std::atomic<size_t> produced{0}, consumed{0};
+
+    const std::size_t WARMUP = q.capacity() / 4;   // pre-produce ¼ of queue
+    assert(WARMUP < ITER && "warm-up must be < total iterations");
+
+    // --- Warm-up Consumer Head Start phase -----------------------------------------------------
+    // This lets the consumer and producer to start working on different entries from the begining. 
+    // But they will probably catch up at some point anyways.
+    {
+        Entry e{};
+        e.meta.f.rpc_method = 1;
+        e.meta.f.seal_index = -1;
+        for (std::size_t i = 0; i < WARMUP; ++i) {
+            e.meta.f.rpc_id = static_cast<uint8_t>(i);
+            while (!q.enqueue(e)) { /* should not happen */ }
+        }
+    }
+
+    // --- Timed phase -------------------------------------------------------
     std::chrono::nanoseconds t_prod{0}, t_cons{0};
 
-    // Producer
-    std::thread producer([&](){
-        Entry e{}; e.meta.f.rpc_method = 1; e.meta.f.seal_index = -1;
-        auto t0 = std::chrono::steady_clock::now();
-        for (std::size_t i = 0; i < ITER; ++i) {
-            for (;;) {
-                e.meta.f.rpc_id = static_cast<uint8_t>(i);
-                if (q.enqueue(e)) break;
-            }
-            ++produced;
+    // Producer: push the *remaining* items
+    std::thread producer([&] {
+        Entry e{};
+        e.meta.f.rpc_method = 1;
+        e.meta.f.seal_index = -1;
+
+        const auto t0 = std::chrono::steady_clock::now();
+        for (std::size_t i = WARMUP; i < ITER; ++i) {
+            e.meta.f.rpc_id = static_cast<uint8_t>(i);
+            while (!q.enqueue(e)) { /* spin */ }
         }
         t_prod = std::chrono::steady_clock::now() - t0;
-        done.store(true, std::memory_order_release);
     });
 
-    // Consumer
-    std::thread consumer([&](){
+    // Consumer: drain the whole queue (warm-up items + produced items)
+    std::thread consumer([&] {
         Entry e{};
-        auto t0 = std::chrono::steady_clock::now();
-        while (!done.load(std::memory_order_acquire) || consumed < produced) {
+        std::size_t consumed = 0;
+        const auto t0 = std::chrono::steady_clock::now();
+
+        while (consumed < ITER) {
             if (q.dequeue(e)) ++consumed;
         }
         t_cons = std::chrono::steady_clock::now() - t0;
@@ -159,6 +176,7 @@ int main(int argc, char* argv[]) {
     producer.join();
     consumer.join();
 
+
     //-----------------------------------------------------------------------
     //  Results
     //-----------------------------------------------------------------------
@@ -166,10 +184,9 @@ int main(int argc, char* argv[]) {
         return static_cast<double>(ns.count()) / iters;
     };
 
-    std::cout << "\nProduced / Consumed : " << produced << " / " << consumed << '\n';
-    assert(consumed == ITER);
+    std::cout << "\nProduced / Consumed : " << ITER << " items\n";
     std::cout << "Producer time       : " << std::fixed << std::setprecision(2)
-              << ns_per(ITER, t_prod) << " ns/op\n";
+              << ns_per(ITER-WARMUP, t_prod) << " ns/op\n";
     std::cout << "Consumer time       : "
               << ns_per(ITER, t_cons) << " ns/op\n";
 
