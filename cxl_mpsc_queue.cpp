@@ -1,54 +1,141 @@
+// cxl_mpsc_queue.cpp
+// ─────────────────────────────────────────────────────────────────────────────
+//  Sanity / micro-benchmark using CXL-backed allocators
+//
+//  CLI (choose **one** form) ––––––––––––––––––––––––––––––––––––––––––––––
+//    pin <cpu_id> numa <node_id> [iter_count]
+//    pin <cpu_id> dax            [iter_count]
+//
+//    • cpu_id      : logical CPU to pin the main thread to
+//    • node_id     : NUMA node for DRAM allocation            (numa form)
+//    • iter_count  : #iterations (default = 10’000’000 = 10 M)
+//
+//  Examples
+//    sudo ./doorbell_bench pin 15 numa 0               # 10 M iters on node 0
+//    sudo ./doorbell_bench pin 3  dax  20_000_000      # 20 M iters on /dev/dax
+//
+//  Build (GCC ≥ 12 or Clang ≥ 15)
+//    g++ -O3 -std=c++20 -march=native -mavx512f -mavx512bw \
+//        -mclflushopt -mclwb -mmovdir64b  \
+//        cxl_mpsc_queue.cpp  -o cxl_mpsc_queue \
+//        -lnuma -lpthread
+// ─────────────────────────────────────────────────────────────────────────────
 
 #include "cxl_mpsc_queue.hpp"
+#include "cxl_allocator.hpp"
+
+#include <atomic>
+#include <cassert>
+#include <chrono>
+#include <cstring>
+#include <iomanip>
+#include <iostream>
+#include <memory>
+#include <numa.h>
+#include <sched.h>
+#include <sstream>
+#include <string>
+#include <thread>
 
 //-------------------------------------------------------------------
-//  Sanity / micro-benchmark
+//  Helpers
 //-------------------------------------------------------------------
-static void pin_to_cpu0() {
-    cpu_set_t set; CPU_ZERO(&set); CPU_SET(0, &set);
-    sched_setaffinity(0, sizeof(set), &set);
+static void pin_to_cpu(int cpu_id) {
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    CPU_SET(cpu_id, &set);
+    if (::sched_setaffinity(0, sizeof(set), &set) != 0)
+        std::perror("sched_setaffinity");
 }
 
+[[noreturn]] static void print_usage(const char* prog) {
+    std::cerr <<
+        "usage  : " << prog << " pin <cpu_id> numa <node_id> [iter_count]\n"
+        "       | " << prog << " pin <cpu_id> dax [iter_count]\n"
+        "notes  : iter_count defaults to 10M when omitted\n";
+    std::exit(EXIT_FAILURE);
+}
+
+//-------------------------------------------------------------------
+//  Main
+//-------------------------------------------------------------------
 int main(int argc, char* argv[]) {
-    if (numa_available() < 0) {
-        std::cerr << "libnuma not available\n";
-        return 1;
+    constexpr std::size_t DEFAULT_ITERS = 10'000'000ULL;
+
+    //-----------------------------------------------------------------------
+    //  Parse CLI
+    //-----------------------------------------------------------------------
+    if (argc < 4) print_usage(argv[0]);
+
+    if (std::string{argv[1]} != "pin") print_usage(argv[0]);
+    int cpu_id = std::stoi(argv[2]);
+    std::string mode = argv[3];
+
+    bool use_dax = false;
+    int  numa_node = -1;
+    std::size_t ITER = DEFAULT_ITERS;
+
+    if (mode == "numa") {
+        if (argc < 5) print_usage(argv[0]);
+        numa_node = std::stoi(argv[4]);
+        if (argc >= 6)  ITER = std::stoull(argv[5]);
+    } else if (mode == "dax") {
+        use_dax = true;
+        if (argc >= 5)  ITER = std::stoull(argv[4]);
+    } else {
+        print_usage(argv[0]);
     }
 
-    int node = 0;                    // default NUMA node
-    size_t ITER     = 1'000'000;
-
-    if (argc >= 2)  node = std::stoi(argv[1]);
-    if (argc >= 3)  ITER     = std::stoull(argv[2]);
-
-    if (node < 0 || node > numa_max_node()) {
-        std::cerr << "Invalid NUMA node id " << node << '\n';
-        return 1;
+    if (!use_dax && (numa_node < 0 || numa_node > numa_max_node())) {
+        std::cerr << "Invalid NUMA node id " << numa_node << '\n';
+        return EXIT_FAILURE;
     }
-    
-    std::cout << "Allocating ring on NUMA node " << node << '\n';
-    std::cout << "Iterations: " << ITER << '\n';
 
-    pin_to_cpu0();  // keep code/data on same node
+    //-----------------------------------------------------------------------
+    //  Pin main thread and create allocator
+    //-----------------------------------------------------------------------
+    pin_to_cpu(cpu_id);
 
-    constexpr uint32_t ORDER = 14;             // 16 384 entries
+    std::unique_ptr<cxl::CxlAllocator> alloc;
+    try {
+        if (use_dax) {
+            alloc = std::make_unique<cxl::DaxAllocator>();
+            std::cout << "Using DAX allocator on /dev/dax* slice\n";
+        } else {
+            alloc = std::make_unique<cxl::NumaAllocator>(numa_node);
+            std::cout << "Using NUMA allocator on node " << numa_node << '\n';
+        }
+    } catch (const std::exception& ex) {
+        std::cerr << "Allocator init failed: " << ex.what() << '\n';
+        return EXIT_FAILURE;
+    }
 
-    const size_t RING_BYTES = (1u << ORDER) * sizeof(Entry);
+    std::cout << "Pinned to CPU " << cpu_id << '\n'
+              << "Iterations      : " << ITER << "\n\n";
 
-    Entry*    ring   = static_cast<Entry*>(numa_alloc_onnode(RING_BYTES, node));
-    uint64_t* tailCL = static_cast<uint64_t*>(numa_alloc_onnode(64, node));
+    //-----------------------------------------------------------------------
+    //  Queue setup – allocate from CXL allocator
+    //-----------------------------------------------------------------------
+    constexpr uint32_t ORDER       = 14;                       // 16 384 entries
+    const std::size_t  RING_BYTES  = (1u << ORDER) * sizeof(Entry);
 
-    CxlMpscQueue q(ring, ORDER, tailCL);
+    Entry*    ring      = static_cast<Entry*>   (alloc->allocate_aligned(RING_BYTES, 64));
+    uint64_t* tail_cxl  = static_cast<uint64_t*>(alloc->allocate_aligned(64,          64));
 
+    CxlMpscQueue q(ring, ORDER, tail_cxl);
+
+    //-----------------------------------------------------------------------
+    //  Producer / Consumer micro-benchmark
+    //-----------------------------------------------------------------------
     std::atomic<bool>   done{false};
     std::atomic<size_t> produced{0}, consumed{0};
     std::chrono::nanoseconds t_prod{0}, t_cons{0};
 
-    // Producer --------------------------------------------------------------
+    // Producer
     std::thread producer([&](){
         Entry e{}; e.meta.f.rpc_method = 1; e.meta.f.seal_index = -1;
         auto t0 = std::chrono::steady_clock::now();
-        for (size_t i = 0; i < ITER; ++i) {
+        for (std::size_t i = 0; i < ITER; ++i) {
             for (;;) {
                 e.meta.f.rpc_id = static_cast<uint8_t>(i);
                 if (q.enqueue(e)) break;
@@ -58,9 +145,8 @@ int main(int argc, char* argv[]) {
         t_prod = std::chrono::steady_clock::now() - t0;
         done.store(true, std::memory_order_release);
     });
-    // std::this_thread::sleep_for(std::chrono::milliseconds(1)); // let producer start
 
-    // Consumer --------------------------------------------------------------
+    // Consumer
     std::thread consumer([&](){
         Entry e{};
         auto t0 = std::chrono::steady_clock::now();
@@ -73,15 +159,20 @@ int main(int argc, char* argv[]) {
     producer.join();
     consumer.join();
 
-    auto ns_per = [ITER](std::chrono::nanoseconds ns) {
-        return static_cast<double>(ns.count()) / ITER;
+    //-----------------------------------------------------------------------
+    //  Results
+    //-----------------------------------------------------------------------
+    const auto ns_per = [](std::size_t iters, std::chrono::nanoseconds ns) {
+        return static_cast<double>(ns.count()) / iters;
     };
 
     std::cout << "\nProduced / Consumed : " << produced << " / " << consumed << '\n';
     assert(consumed == ITER);
-    std::cout << "Producer time       : " << ns_per(t_prod) << " ns/op\n";
-    std::cout << "Consumer time       : " << ns_per(t_cons) << " ns/op\n";
+    std::cout << "Producer time       : " << std::fixed << std::setprecision(2)
+              << ns_per(ITER, t_prod) << " ns/op\n";
+    std::cout << "Consumer time       : "
+              << ns_per(ITER, t_cons) << " ns/op\n";
+
     q.print_metrics();
-    
     return 0;
 }
