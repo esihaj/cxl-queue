@@ -234,7 +234,7 @@ public:
         ++metrics.dequeue_calls;
 
         Entry tmp;
-         _mm_clflushopt(&ring_[tail_ & mask_]); // not needed on UC/WC memory
+        _mm_clflushopt(&ring_[tail_ & mask_]); // not needed on UC/WC memory
         nt_load_64B(&tmp, &ring_[tail_ & mask_]);
 
         const uint8_t expected_epoch =
