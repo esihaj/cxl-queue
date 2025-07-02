@@ -55,7 +55,6 @@ static void pin_to_cpu(int cpu_id) {
         "notes  : iter_count defaults to 10M when omitted\n";
     std::exit(EXIT_FAILURE);
 }
-
 //-------------------------------------------------------------------
 //  Main
 //-------------------------------------------------------------------
@@ -68,20 +67,20 @@ int main(int argc, char* argv[]) {
     if (argc < 4) print_usage(argv[0]);
 
     if (std::string{argv[1]} != "pin") print_usage(argv[0]);
-    int cpu_id = std::stoi(argv[2]);
-    std::string mode = argv[3];
+    const int         cpu_id = std::stoi(argv[2]);
+    const std::string mode   = argv[3];
 
-    bool use_dax = false;
-    int  numa_node = -1;
-    std::size_t ITER = DEFAULT_ITERS;
+    bool        use_dax   = false;
+    int         numa_node = -1;
+    std::size_t ITER      = DEFAULT_ITERS;
 
     if (mode == "numa") {
         if (argc < 5) print_usage(argv[0]);
         numa_node = std::stoi(argv[4]);
-        if (argc >= 6)  ITER = std::stoull(argv[5]);
+        if (argc >= 6) ITER = std::stoull(argv[5]);
     } else if (mode == "dax") {
         use_dax = true;
-        if (argc >= 5)  ITER = std::stoull(argv[4]);
+        if (argc >= 5) ITER = std::stoull(argv[4]);
     } else {
         print_usage(argv[0]);
     }
@@ -127,14 +126,10 @@ int main(int argc, char* argv[]) {
     //-----------------------------------------------------------------------
     //  Producer / Consumer micro-benchmark with warm-up
     //-----------------------------------------------------------------------
-
     const std::size_t WARMUP = q.capacity() / 4;   // pre-produce ¼ of queue
     assert(WARMUP < ITER && "warm-up must be < total iterations");
 
-    // --- Warm-up Consumer Head Start phase -----------------------------------------------------
-    // This lets the consumer and producer to start working on different entries from the begining. 
-    // But they will probably catch up at some point anyways.
-    {
+    {   // warm-up phase
         Entry e{};
         e.meta.f.rpc_method = 1;
         e.meta.f.seal_index = -1;
@@ -144,10 +139,15 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // --- Timed phase -------------------------------------------------------
+    // ── Record baseline metrics AFTER warm-up ──────────────────────────────
+    const std::size_t enqueue_warmup_calls =
+        q.get_metrics().enqueue_calls.load(std::memory_order_relaxed);
+    const std::size_t dequeue_warmup_calls =
+        q.get_metrics().dequeue_calls.load(std::memory_order_relaxed);
+
+    // ── Timed phase ────────────────────────────────────────────────────────
     std::chrono::nanoseconds t_prod{0}, t_cons{0};
 
-    // Producer: push the *remaining* items
     std::thread producer([&] {
         Entry e{};
         e.meta.f.rpc_method = 1;
@@ -161,7 +161,6 @@ int main(int argc, char* argv[]) {
         t_prod = std::chrono::steady_clock::now() - t0;
     });
 
-    // Consumer: drain the whole queue (warm-up items + produced items)
     std::thread consumer([&] {
         Entry e{};
         std::size_t consumed = 0;
@@ -176,20 +175,35 @@ int main(int argc, char* argv[]) {
     producer.join();
     consumer.join();
 
-
     //-----------------------------------------------------------------------
     //  Results
     //-----------------------------------------------------------------------
-    const auto ns_per = [](std::size_t iters, std::chrono::nanoseconds ns) {
-        return static_cast<double>(ns.count()) / iters;
+    const auto ns_per = [](std::size_t calls, std::chrono::nanoseconds ns) {
+        return static_cast<double>(ns.count()) / calls;
     };
 
+    const std::size_t produced_items = ITER - WARMUP;
+    const std::size_t enqueue_total_calls =
+        q.get_metrics().enqueue_calls.load(std::memory_order_relaxed) - enqueue_warmup_calls;
+    const std::size_t dequeue_total_calls =
+        q.get_metrics().dequeue_calls.load(std::memory_order_relaxed) - dequeue_warmup_calls;
+
     std::cout << "\nProduced / Consumed : " << ITER << " items\n";
+
+    // Throughput per *successful* item
     std::cout << "Producer time       : " << std::fixed << std::setprecision(2)
-              << ns_per(ITER-WARMUP, t_prod) << " ns/op\n";
+              << ns_per(produced_items, t_prod) << " ns/op\n";
     std::cout << "Consumer time       : "
               << ns_per(ITER, t_cons) << " ns/op\n";
 
+    // Average cost per enqueue / dequeue *call* (includes retries / polls)
+    std::cout << "Enqueue time        : "
+              << ns_per(enqueue_total_calls, t_prod) << " ns/enq\n";
+    std::cout << "Dequeue time        : "
+              << ns_per(dequeue_total_calls, t_cons) << " ns/deq\n\n";
+    std::cout << "Memory time        : "
+              << ns_per(dequeue_total_calls + enqueue_total_calls, t_cons) << " ns/deq\n\n";
     q.print_metrics();
     return 0;
 }
+
