@@ -32,34 +32,43 @@
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Low-level helpers (AVX-512 only)
+//  Non-temporal stores are used to bypass the cache.
+//  Non Temporal loads are only effective on UC/WC memory. So we use cache flush for loads instead
 // ─────────────────────────────────────────────────────────────────────────────
 
-static inline void nt_store_64B(void* dst, const void* src) noexcept
+// src and dst **must** be 64-B aligned.
+static inline void store_nt_64B(void* dst, const void* src) noexcept
 {
-    const __m512i v = _mm512_loadu_si512(src);                 // src in L1
-    _mm512_stream_si512(reinterpret_cast<__m512i*>(dst), v);   // NT-store
+    const __m512i v = _mm512_load_si512(src);                 // src in L1
+    _mm512_stream_si512(reinterpret_cast<__m512i*>(dst), v); // NT-store
     _mm_sfence();
 }
 
-static inline void nt_load_64B(void* dst, const void* src) noexcept
+// src and dst **must** be 64-B aligned.
+static inline void load_fresh_64B(void* dst, void* src) noexcept
 {
-    const __m512i v = _mm512_stream_load_si512(const_cast<void*>(src));
-    _mm512_storeu_si512(dst, v);
+    _mm_clflushopt(src);
+    _mm_mfence(); // complete the eviction
+
+    const __m512i v = _mm512_load_si512(src);
+    _mm512_store_si512(dst, v);
 }
 
-static inline uint64_t nt_load_u64(const uint64_t* src) noexcept
-{
-    __m128i v = _mm_stream_load_si128(
-        const_cast<__m128i*>(reinterpret_cast<const __m128i*>(src)));
-    return static_cast<uint64_t>(_mm_cvtsi128_si64(v));
-}
-
-static inline void nt_store_u64(uint64_t* dst, uint64_t val) noexcept
+static inline void store_nt_u64(uint64_t* dst, uint64_t val) noexcept
 {
     _mm_stream_si64(reinterpret_cast<long long*>(dst),
                     static_cast<long long>(val));
     _mm_sfence();
 }
+
+static inline uint64_t load_fresh_u64(uint64_t* src) noexcept
+{
+    _mm_clflushopt(src);
+    _mm_mfence();
+
+    return *src;  // regular read
+}
+
 
 using u64_may_alias = uint64_t __attribute__((may_alias));
 
@@ -173,7 +182,7 @@ public:
         static_assert(alignof(Entry) == 64, "Entry must be alignas(64)");
 
         std::memset(ring_, 0, sizeof(Entry) * (1u << order_));
-        nt_store_u64(cxl_tail_, tail_);
+        store_nt_u64(cxl_tail_, tail_);
     }
 
     // ────────────────────────────────────────────────────────────────
@@ -198,7 +207,7 @@ public:
                     << " cap=" << cap << '\n';
 
             /* refresh tail from CXL */
-            shadow_tail_ = static_cast<uint32_t>(nt_load_u64(cxl_tail_));
+            shadow_tail_ = static_cast<uint32_t>(load_fresh_u64(cxl_tail_));
 
             /* still full after refresh → give up */
             if (static_cast<int32_t>(slot - shadow_tail_) >=
@@ -218,7 +227,7 @@ public:
         tmp.meta.f.checksum = 0;
         tmp.meta.f.checksum = xor_checksum64(&tmp);
 
-        nt_store_64B(&ring_[slot & mask_], &tmp);
+        store_nt_64B(&ring_[slot & mask_], &tmp);
         _mm_sfence();                               // order NT-store
 
         head_.store(slot + 1, std::memory_order_release);
@@ -234,8 +243,7 @@ public:
         ++metrics.dequeue_calls;
 
         Entry tmp;
-        _mm_clflushopt(&ring_[tail_ & mask_]); // not needed on UC/WC memory
-        nt_load_64B(&tmp, &ring_[tail_ & mask_]);
+        load_fresh_64B(&tmp, &ring_[tail_ & mask_]);
 
         const uint8_t expected_epoch =
             static_cast<uint8_t>(tail_ >> order_) + 1;
@@ -310,7 +318,7 @@ private:
     // ────────────────────────────────────────────────────────────────
     inline void flush_tail(bool debug = false)
     {
-        nt_store_u64(cxl_tail_, tail_);
+        store_nt_u64(cxl_tail_, tail_);
         ++metrics.flush_tail;
 
         if (debug)
