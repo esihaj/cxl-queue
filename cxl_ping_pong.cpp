@@ -18,8 +18,8 @@
 //      iter_count  – ping-pong iterations (default 1'000'000)
 // ─────────────────────────────────────────────────────────────────────────────
 
-#include "cxl_mpsc_queue.hpp"
-#include "cxl_allocator.hpp"          // ← NEW
+#include "cxl_mpsc_queue_exp.hpp"
+#include "cxl_allocator.hpp"
 #include <iomanip>
 #include <pthread.h>
 #include <cstring>
