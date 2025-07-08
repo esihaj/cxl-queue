@@ -112,6 +112,8 @@ int main(int argc, char* argv[])
             if (req.meta.f.rpc_id != static_cast<uint16_t>(i & 0xFFFF) ||
                 req.args[0] != i) {
                 std::cerr << "[server] validation error on i=" << i << std::endl;
+                std::cerr << "[server] req.meta.f.rpc_id=" << req.meta.f.rpc_id << ", expected=" << (i & 0xFFFF)
+                          << "\nreq.args[0]=" << req.args[0] << std::endl;
                 std::abort();
             }
 
@@ -141,6 +143,8 @@ int main(int argc, char* argv[])
         if (rsp.meta.f.rpc_id != req.meta.f.rpc_id ||
             rsp.args[0] != req.args[0]) {
             std::cerr << "[client] validation error on i=" << i << std::endl;
+            std::cerr << "[client] rsp.meta.f.rpc_id=" << rsp.meta.f.rpc_id << ", expected=" << req.meta.f.rpc_id
+                      << "\nrsp.args[0]=" << rsp.args[0] << ", expected=" << req.args[0] << std::endl;
             return 1;
         }
     }

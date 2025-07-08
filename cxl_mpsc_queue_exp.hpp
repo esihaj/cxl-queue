@@ -74,14 +74,52 @@ static inline void cpu_relax_for_cycles(uint32_t cycles) noexcept
 
 using u64_may_alias = uint64_t __attribute__((may_alias));
 
-static inline uint16_t xor_checksum64(const void* p) noexcept
+// static inline uint16_t xor_checksum64(const void* p) noexcept
+// {
+//     const u64_may_alias* u = reinterpret_cast<const u64_may_alias*>(p);
+//     uint64_t acc = 0;
+//     for (int i = 0; i < 8; ++i) acc ^= u[i];
+//     acc = (acc >> 32) ^ (acc & 0xFFFFFFFFULL);
+//     acc = (acc >> 16) ^ (acc & 0xFFFFULL);
+//     return static_cast<uint16_t>(acc);
+// }
+
+[[gnu::always_inline]]
+static inline std::uint16_t xor_checksum64(const void* ptr) noexcept
 {
-    const u64_may_alias* u = reinterpret_cast<const u64_may_alias*>(p);
-    uint64_t acc = 0;
-    for (int i = 0; i < 8; ++i) acc ^= u[i];
-    acc = (acc >> 32) ^ (acc & 0xFFFFFFFFULL);
-    acc = (acc >> 16) ^ (acc & 0xFFFFULL);
-    return static_cast<uint16_t>(acc);
+    // ———————————————————————— 1. Load 64 B -------------------------------------------------
+    // vmovdqa64 zmm0, [rdi]
+    // Aligned load = 1 µ-op, 1 cycle issue, no penalties.
+    __m512i v512 = _mm512_load_si512(ptr);
+
+    // ———————————————————————— 2. 512 → 256 bits --------------------------------------------
+    //  Split the ZMM into two YMM halves and XOR them.
+    //
+    //  _mm512_castsi512_si256:   no-op cast (low 256 bits)
+    //  _mm512_extracti64x4_epi64: shuffle to grab high 256 (imm=1)
+    //  _mm256_xor_si256:         vp xorq ymm0, ymm0, ymm1
+    __m256i v256 = _mm256_xor_si256(
+        _mm512_castsi512_si256(v512),          // low 256
+        _mm512_extracti64x4_epi64(v512, 1));   // high 256
+
+    // ———————————————————————— 3. 256 → 128 bits --------------------------------------------
+    //  Same idea: split YMM into two XMM lanes and XOR.
+    __m128i v128 = _mm_xor_si128(
+        _mm256_castsi256_si128(v256),          // low 128
+        _mm256_extracti128_si256(v256, 1));    // high 128
+
+    // ———————————————————————— 4. 128 → 64 bits ---------------------------------------------
+    //  One 1-cycle shuffle to move the upper 64 bits down,
+    //  then XOR – cheaper latency than going through GP regs.
+    __m128i v64  = _mm_xor_si128(v128, _mm_srli_si128(v128, 8));
+
+    // ———————————————————————— 5. scalar fold 64 → 16 bits -------------------------------
+    //  movq   rax, xmm         (no µ-op on Intel)
+    //  Two shift+XOR folds – classic CRC style parity collapse.
+    std::uint64_t acc = _mm_cvtsi128_si64(v64);
+    acc ^= acc >> 32;
+    acc ^= acc >> 16;
+    return static_cast<std::uint16_t>(acc);
 }
 
 static inline bool verify_checksum(const void* p) noexcept
@@ -200,21 +238,21 @@ public:
     bool enqueue(Entry& in, bool debug = false)
     {
         static thread_local ExponentialBackoff backoff_full{128};
-        ++metrics.enqueue_calls;
 
         uint32_t slot = head_.load(std::memory_order_relaxed);
         const uint32_t cap = 1u << order_;
+        ++metrics.enqueue_calls;
 
         /* fast check: ring looks full? */
         if (static_cast<int32_t>(slot - shadow_tail_) >=
             static_cast<int32_t>(cap))
         {
             ++metrics.read_cxl_tail;
-            if (debug)
-                std::osyncstream(std::cout)
-                    << "[enqueue] ring-full slot=" << slot
-                    << " shadow_tail=" << shadow_tail_
-                    << " cap=" << cap << '\n';
+            // if (debug)
+            //     std::osyncstream(std::cout)
+            //         << "[enqueue] ring-full slot=" << slot
+            //         << " shadow_tail=" << shadow_tail_
+            //         << " cap=" << cap << '\n';
 
             /* refresh tail from CXL */
             shadow_tail_ = static_cast<uint32_t>(load_fresh_u64(cxl_tail_));
@@ -226,9 +264,9 @@ public:
                 ++metrics.queue_full;
                 backoff_full.pause(metrics.producer_backoff_events,
                                    metrics.producer_backoff_cycles_waited);
-                if (debug)
-                    std::osyncstream(std::cout)
-                        << "[enqueue] queue_full (after CXL tail read)\n";
+                // if (debug)
+                //     std::osyncstream(std::cout)
+                //         << "[enqueue] queue_full (after CXL tail read)\n";
                 return false;
             }
         }
@@ -267,11 +305,11 @@ public:
             ++metrics.no_new_items;
             backoff_empty.pause(metrics.consumer_backoff_events,
                                 metrics.consumer_backoff_cycles_waited);
-            if (debug)
-                std::osyncstream(std::cout)
-                    << "[dequeue] epoch mismatch tail=" << tail_
-                    << " exp=" << +expected_epoch
-                    << " got=" << +out.meta.f.epoch << '\n';
+            // if (debug)
+            //     std::osyncstream(std::cout)
+            //         << "[dequeue] epoch mismatch tail=" << tail_
+            //         << " exp=" << +expected_epoch
+            //         << " got=" << +out.meta.f.epoch << '\n';
             return false;
         }
 
@@ -280,9 +318,9 @@ public:
             ++metrics.checksum_failed;
             backoff_checksum.pause(metrics.consumer_backoff_events,
                                    metrics.consumer_backoff_cycles_waited);
-            if (debug)
-                std::osyncstream(std::cout)
-                    << "[dequeue] checksum failed at tail=" << tail_ << '\n';
+            // if (debug)
+            //     std::osyncstream(std::cout)
+            //         << "[dequeue] checksum failed at tail=" << tail_ << '\n';
             return false;
         }
 
@@ -336,9 +374,9 @@ private:
         store_nt_u64(cxl_tail_, tail_);
         ++metrics.flush_tail;
 
-        if (debug)
-            std::osyncstream(std::cout)
-                << "[flush_tail] WRITE cxl_tail=" << tail_ << '\n';
+        // if (debug)
+        //     std::osyncstream(std::cout)
+        //         << "[flush_tail] WRITE cxl_tail=" << tail_ << '\n';
     }
 
     /* fixed data ---------------------------------------------------- */
@@ -347,6 +385,7 @@ private:
     const uint32_t            mask_;
     std::atomic<uint32_t>     head_;
     uint32_t                  shadow_tail_;
+    
     uint32_t                  tail_;
     uint64_t* const           cxl_tail_;
 

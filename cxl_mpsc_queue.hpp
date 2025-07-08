@@ -82,6 +82,44 @@ static inline uint16_t xor_checksum64(const void* p) noexcept
     return static_cast<uint16_t>(acc);
 }
 
+// [[gnu::always_inline]]
+// static inline std::uint16_t xor_checksum64(const void* ptr) noexcept
+// {
+//     // ———————————————————————— 1. Load 64 B -------------------------------------------------
+//     // vmovdqa64 zmm0, [rdi]
+//     // Aligned load = 1 µ-op, 1 cycle issue, no penalties.
+//     __m512i v512 = _mm512_load_si512(ptr);
+
+//     // ———————————————————————— 2. 512 → 256 bits --------------------------------------------
+//     //  Split the ZMM into two YMM halves and XOR them.
+//     //
+//     //  _mm512_castsi512_si256:   no-op cast (low 256 bits)
+//     //  _mm512_extracti64x4_epi64: shuffle to grab high 256 (imm=1)
+//     //  _mm256_xor_si256:         vp xorq ymm0, ymm0, ymm1
+//     __m256i v256 = _mm256_xor_si256(
+//         _mm512_castsi512_si256(v512),          // low 256
+//         _mm512_extracti64x4_epi64(v512, 1));   // high 256
+
+//     // ———————————————————————— 3. 256 → 128 bits --------------------------------------------
+//     //  Same idea: split YMM into two XMM lanes and XOR.
+//     __m128i v128 = _mm_xor_si128(
+//         _mm256_castsi256_si128(v256),          // low 128
+//         _mm256_extracti128_si256(v256, 1));    // high 128
+
+//     // ———————————————————————— 4. 128 → 64 bits ---------------------------------------------
+//     //  One 1-cycle shuffle to move the upper 64 bits down,
+//     //  then XOR – cheaper latency than going through GP regs.
+//     __m128i v64  = _mm_xor_si128(v128, _mm_srli_si128(v128, 8));
+
+//     // ———————————————————————— 5. scalar fold 64 → 16 bits -------------------------------
+//     //  movq   rax, xmm         (no µ-op on Intel)
+//     //  Two shift+XOR folds – classic CRC style parity collapse.
+//     std::uint64_t acc = _mm_cvtsi128_si64(v64);
+//     acc ^= acc >> 32;
+//     acc ^= acc >> 16;
+//     return static_cast<std::uint16_t>(acc);
+// }
+
 static inline bool verify_checksum(const void* p) noexcept
 {
     return xor_checksum64(p) == 0;          // whole-line XOR must be 0
