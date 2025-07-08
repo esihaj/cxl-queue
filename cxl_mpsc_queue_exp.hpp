@@ -42,7 +42,7 @@ static inline void store_nt_64B(void* dst, const void* src) noexcept
 static inline void load_fresh_64B(void* dst, void* src) noexcept
 {
     _mm_clflushopt(src);
-    _mm_mfence(); // complete the eviction
+    _mm_sfence(); // complete the eviction
 
     const __m512i v = _mm512_load_si512(src);
     _mm512_store_si512(dst, v);
@@ -58,7 +58,7 @@ static inline void store_nt_u64(uint64_t* dst, uint64_t val) noexcept
 static inline uint64_t load_fresh_u64(uint64_t* src) noexcept
 {
     _mm_clflushopt(src);
-    _mm_mfence();
+    _mm_sfence();
 
     return *src;  // regular read
 }
@@ -197,7 +197,7 @@ public:
     // ────────────────────────────────────────────────────────────────
     //  enqueue — with back-off on queue full
     // ────────────────────────────────────────────────────────────────
-    bool enqueue(const Entry& in, bool debug = false)
+    bool enqueue(Entry& in, bool debug = false)
     {
         static thread_local ExponentialBackoff backoff_full{128};
         ++metrics.enqueue_calls;
@@ -237,12 +237,11 @@ public:
         backoff_full.reset();
 
         /* prepare entry (checksum over 64 B) */
-        Entry tmp           = in;
-        tmp.meta.f.epoch    = static_cast<uint8_t>(slot >> order_) + 1;
-        tmp.meta.f.checksum = 0;
-        tmp.meta.f.checksum = xor_checksum64(&tmp);
+        in.meta.f.epoch    = static_cast<uint8_t>(slot >> order_) + 1;
+        in.meta.f.checksum = 0;
+        in.meta.f.checksum = xor_checksum64(&in);
 
-        store_nt_64B(&ring_[slot & mask_], &tmp);
+        store_nt_64B(&ring_[slot & mask_], &in);
         _mm_sfence();                       // order NT-store
 
         head_.store(slot + 1, std::memory_order_release);
@@ -258,14 +257,13 @@ public:
         static thread_local ExponentialBackoff backoff_checksum{100};
         ++metrics.dequeue_calls;
 
-        Entry tmp;
-        load_fresh_64B(&tmp, &ring_[tail_ & mask_]);
+        load_fresh_64B(&out, &ring_[tail_ & mask_]);
 
         const uint8_t expected_epoch =
             static_cast<uint8_t>(tail_ >> order_) + 1;
 
         /* epoch mismatch → nothing new yet */
-        if (tmp.meta.f.epoch != expected_epoch) {
+        if (out.meta.f.epoch != expected_epoch) {
             ++metrics.no_new_items;
             backoff_empty.pause(metrics.consumer_backoff_events,
                                 metrics.consumer_backoff_cycles_waited);
@@ -273,12 +271,12 @@ public:
                 std::osyncstream(std::cout)
                     << "[dequeue] epoch mismatch tail=" << tail_
                     << " exp=" << +expected_epoch
-                    << " got=" << +tmp.meta.f.epoch << '\n';
+                    << " got=" << +out.meta.f.epoch << '\n';
             return false;
         }
 
         /* checksum mismatch */
-        if (!verify_checksum(&tmp)) {
+        if (!verify_checksum(&out)) {
             ++metrics.checksum_failed;
             backoff_checksum.pause(metrics.consumer_backoff_events,
                                    metrics.consumer_backoff_cycles_waited);
@@ -289,7 +287,6 @@ public:
         }
 
         /* success */
-        out = tmp;
         ++tail_;
         backoff_empty.reset();
         backoff_checksum.reset();

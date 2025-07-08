@@ -48,7 +48,7 @@ static inline void store_nt_64B(void* dst, const void* src) noexcept
 static inline void load_fresh_64B(void* dst, void* src) noexcept
 {
     _mm_clflushopt(src);
-    _mm_mfence(); // complete the eviction
+    _mm_sfence(); // complete the eviction
 
     const __m512i v = _mm512_load_si512(src);
     _mm512_store_si512(dst, v);
@@ -64,7 +64,7 @@ static inline void store_nt_u64(uint64_t* dst, uint64_t val) noexcept
 static inline uint64_t load_fresh_u64(uint64_t* src) noexcept
 {
     _mm_clflushopt(src);
-    _mm_mfence();
+    _mm_sfence();
 
     return *src;  // regular read
 }
