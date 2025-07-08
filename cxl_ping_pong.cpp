@@ -18,7 +18,7 @@
 //      iter_count  – ping-pong iterations (default 1'000'000)
 // ─────────────────────────────────────────────────────────────────────────────
 
-#include "cxl_mpsc_queue_exp.hpp"
+#include "cxl_mpsc_queue.hpp"
 #include "cxl_allocator.hpp"
 #include <iomanip>
 #include <pthread.h>
@@ -153,9 +153,9 @@ int main(int argc, char* argv[])
     const double rtt_ns   = total_ns / static_cast<double>(iters);
 
     const long total_memory_access = q_req.get_metrics().enqueue_calls.load() +
-                                      q_req.get_metrics().dequeue_calls.load() +
+                                      q_req.get_metrics().dequeue_calls +
                                       q_rsp.get_metrics().enqueue_calls.load() +
-                                      q_rsp.get_metrics().dequeue_calls.load();
+                                      q_rsp.get_metrics().dequeue_calls;
 
     std::cout << "Memory accesses      : " << total_memory_access << '\n';
 

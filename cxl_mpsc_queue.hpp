@@ -112,25 +112,23 @@ static_assert(sizeof(Entry) == 64, "Entry must be 64 B");
 struct Metrics {
     /* call counters ------------------------------------------------- */
     std::atomic<size_t> enqueue_calls   {0};
-    std::atomic<size_t> dequeue_calls   {0};
+    size_t dequeue_calls   {0};
 
     /* queue-state probes ------------------------------------------- */
     std::atomic<size_t> read_cxl_tail   {0};
     std::atomic<size_t> queue_full      {0};
-    std::atomic<size_t> no_new_items    {0};
-    std::atomic<size_t> checksum_failed {0};
-    std::atomic<size_t> flush_tail      {0};
+    size_t no_new_items    {0};
+    size_t checksum_failed {0};
+    size_t flush_tail      {0};
 
     /* back-off activity -------------------------------------------- */
-    std::atomic<size_t> backoff_spin    {0};   // # _mm_pause()’s
-    std::atomic<size_t> backoff_yield   {0};   // # std::this_thread::yield()’s
-    std::atomic<size_t> backoff_sleep   {0};   // # short sleeps
+    size_t backoff_spin    {0};   // # _mm_pause()’s
+    size_t backoff_yield   {0};   // # std::this_thread::yield()’s
+    size_t backoff_sleep   {0};   // # short sleeps
 
     size_t backoff_total() const noexcept
     {
-        return backoff_spin.load(std::memory_order_relaxed) +
-               backoff_yield.load(std::memory_order_relaxed) +
-               backoff_sleep.load(std::memory_order_relaxed);
+        return backoff_spin + backoff_yield + backoff_sleep;
     }
 };
 
@@ -145,13 +143,13 @@ struct Backoff {
     {
         if (spins < 8) {
             _mm_pause();
-            m.backoff_spin.fetch_add(1, std::memory_order_relaxed);
+            m.backoff_spin++;
         } else if (spins < 16) {
             std::this_thread::yield();
-            m.backoff_yield.fetch_add(1, std::memory_order_relaxed);
+            m.backoff_yield++;
         } else {
             std::this_thread::sleep_for(std::chrono::nanoseconds{100});
-            m.backoff_sleep.fetch_add(1, std::memory_order_relaxed);
+            m.backoff_sleep++;
         }
         ++spins;
     }
@@ -193,10 +191,8 @@ public:
     // ────────────────────────────────────────────────────────────────
     //  enqueue
     // ────────────────────────────────────────────────────────────────
-    bool enqueue(const Entry& in, bool debug = false)
+    bool enqueue(Entry& in2, bool debug = false)
     {
-        ++metrics.enqueue_calls;
-
         uint32_t slot = head_.load(std::memory_order_relaxed);
         const uint32_t cap = 1u << order_;
 
@@ -204,7 +200,6 @@ public:
         if (static_cast<int32_t>(slot - shadow_tail_) >=
             static_cast<int32_t>(cap))
         {
-            ++metrics.read_cxl_tail;
             if (debug)
                 std::osyncstream(std::cout)
                     << "[enqueue] ring-full slot=" << slot
@@ -213,6 +208,8 @@ public:
 
             /* refresh tail from CXL */
             shadow_tail_ = static_cast<uint32_t>(load_fresh_u64(cxl_tail_));
+            ++metrics.enqueue_calls; // we do this after the call to load_fresh_u64
+            ++metrics.read_cxl_tail;
 
             /* still full after refresh → give up */
             if (static_cast<int32_t>(slot - shadow_tail_) >=
@@ -224,15 +221,17 @@ public:
                         << "[enqueue] queue_full (after CXL tail read)\n";
                 return false;
             }
+        } else {
+            ++metrics.enqueue_calls;
         }
 
         /* prepare entry (checksum over 64 B) */
-        Entry tmp           = in;
-        tmp.meta.f.epoch    = static_cast<uint8_t>(slot >> order_) + 1;
-        tmp.meta.f.checksum = 0;
-        tmp.meta.f.checksum = xor_checksum64(&tmp);
+        // fill in instead of tmp
+        in2.meta.f.epoch    = static_cast<uint8_t>(slot >> order_) + 1;
+        in2.meta.f.checksum = 0;
+        in2.meta.f.checksum = xor_checksum64(&in2);
 
-        store_nt_64B(&ring_[slot & mask_], &tmp);
+        store_nt_64B(&ring_[slot & mask_], &in2);
         _mm_sfence();                               // order NT-store
 
         head_.store(slot + 1, std::memory_order_release);
@@ -245,29 +244,28 @@ public:
     bool dequeue(Entry& out, bool debug = false)
     {
         static thread_local Backoff backoff;
-        ++metrics.dequeue_calls;
 
-        Entry tmp;
-        load_fresh_64B(&tmp, &ring_[tail_ & mask_]);
+        load_fresh_64B(&out, &ring_[tail_ & mask_]);
+        ++metrics.dequeue_calls;
 
         const uint8_t expected_epoch =
             static_cast<uint8_t>(tail_ >> order_) + 1;
 
         /* epoch mismatch → nothing new yet */
-        if (tmp.meta.f.epoch != expected_epoch) {
+        if (out.meta.f.epoch != expected_epoch) {
             ++metrics.no_new_items;
             if (debug)
                 std::osyncstream(std::cout)
                     << "[dequeue] epoch mismatch tail=" << tail_
                     << " exp=" << +expected_epoch
-                    << " got=" << +tmp.meta.f.epoch << '\n';
+                    << " got=" << +out.meta.f.epoch << '\n';
 
             backoff.pause(metrics);
             return false;
         }
 
         /* checksum mismatch */
-        if (!verify_checksum(&tmp)) {
+        if (!verify_checksum(&out)) {
             ++metrics.checksum_failed;
             if (debug)
                 std::osyncstream(std::cout)
@@ -278,7 +276,6 @@ public:
         }
 
         /* success */
-        out = tmp;
         ++tail_;
         backoff.reset();
 
@@ -305,16 +302,16 @@ public:
     {
         os << "── Metrics [" << label << "] ─────────────────────\n"
            << "Enqueue calls        : " << metrics.enqueue_calls.load()   << '\n'
-           << "Dequeue calls        : " << metrics.dequeue_calls.load()   << '\n'
+           << "Dequeue calls        : " << metrics.dequeue_calls   << '\n'
            << "CXL-tail reads       : " << metrics.read_cxl_tail.load()   << '\n'
            << "Still-full           : " << metrics.queue_full.load()      << '\n'
-           << "No-new-item polls    : " << metrics.no_new_items.load()    << '\n'
-           << "Checksum failures    : " << metrics.checksum_failed.load() << '\n'
-           << "Tail flushes         : " << metrics.flush_tail.load()      << '\n'
+           << "No-new-item polls    : " << metrics.no_new_items    << '\n'
+           << "Checksum failures    : " << metrics.checksum_failed << '\n'
+           << "Tail flushes         : " << metrics.flush_tail      << '\n'
            << "Back-off (total)     : " << metrics.backoff_total()        << '\n'
-           << "Back-off (spin)      : " << metrics.backoff_spin.load()    << '\n'
-           << "Back-off (yield)     : " << metrics.backoff_yield.load()   << '\n'
-           << "Back-off (sleep)     : " << metrics.backoff_sleep.load()   << '\n';
+           << "Back-off (spin)      : " << metrics.backoff_spin    << '\n'
+           << "Back-off (yield)     : " << metrics.backoff_yield   << '\n'
+           << "Back-off (sleep)     : " << metrics.backoff_sleep   << '\n';
     }
 
 private:

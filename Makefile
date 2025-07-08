@@ -8,7 +8,7 @@ CXX := g++
 #  Common flags
 # ---------------------------------------------------------------------------
 STD        := -std=c++20
-OPT        := -O3 -g -march=native -fno-omit-frame-pointer
+OPT        := -O2 -g -march=native -fno-omit-frame-pointer
 # -fno-inline is useful for profiling
 THREADING  := -pthread
 LDFLAGS    := -lnuma $(THREADING)

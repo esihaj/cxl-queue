@@ -21,7 +21,7 @@
 //        -lnuma -lpthread
 // ─────────────────────────────────────────────────────────────────────────────
 
-#include "cxl_mpsc_queue.hpp"
+#include "cxl_mpsc_queue_exp.hpp"
 #include "cxl_allocator.hpp"
 
 #include <atomic>
@@ -141,9 +141,9 @@ int main(int argc, char* argv[]) {
 
     // ── Record baseline metrics AFTER warm-up ──────────────────────────────
     const std::size_t enqueue_warmup_calls =
-        q.get_metrics().enqueue_calls.load(std::memory_order_relaxed);
+        q.get_metrics().enqueue_calls;
     const std::size_t dequeue_warmup_calls =
-        q.get_metrics().dequeue_calls.load(std::memory_order_relaxed);
+        q.get_metrics().dequeue_calls;
 
     // ── Timed phase ────────────────────────────────────────────────────────
     std::chrono::nanoseconds t_prod{0}, t_cons{0};
@@ -184,9 +184,9 @@ int main(int argc, char* argv[]) {
 
     const std::size_t produced_items = ITER - WARMUP;
     const std::size_t enqueue_total_calls =
-        q.get_metrics().enqueue_calls.load(std::memory_order_relaxed) - enqueue_warmup_calls;
+        q.get_metrics().enqueue_calls - enqueue_warmup_calls;
     const std::size_t dequeue_total_calls =
-        q.get_metrics().dequeue_calls.load(std::memory_order_relaxed) - dequeue_warmup_calls;
+        q.get_metrics().dequeue_calls - dequeue_warmup_calls;
 
     std::cout << "\nProduced / Consumed : " << ITER << " items\n";
 

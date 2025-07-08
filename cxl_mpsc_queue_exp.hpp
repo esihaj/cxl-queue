@@ -113,23 +113,23 @@ static_assert(sizeof(Entry) == 64, "Entry must be 64 B");
 
 struct Metrics {
     /* call counters ------------------------------------------------- */
-    std::atomic<size_t> enqueue_calls   {0};
-    std::atomic<size_t> dequeue_calls   {0};
+    size_t enqueue_calls   {0};
+    size_t dequeue_calls   {0};
 
     /* queue-state probes ------------------------------------------- */
-    std::atomic<size_t> read_cxl_tail   {0};
-    std::atomic<size_t> queue_full      {0};
-    std::atomic<size_t> no_new_items    {0};
-    std::atomic<size_t> checksum_failed {0};
-    std::atomic<size_t> flush_tail      {0};
+    size_t read_cxl_tail   {0};
+    size_t queue_full      {0};
+    size_t no_new_items    {0};
+    size_t checksum_failed {0};
+    size_t flush_tail      {0};
 
     /* Consumer (dequeue) back-off activity ------------------------- */
-    std::atomic<size_t> consumer_backoff_events        {0};
-    std::atomic<size_t> consumer_backoff_cycles_waited {0};
+    size_t consumer_backoff_events        {0};
+    size_t consumer_backoff_cycles_waited {0};
 
     /* Producer (enqueue) back-off activity ------------------------- */
-    std::atomic<size_t> producer_backoff_events        {0};
-    std::atomic<size_t> producer_backoff_cycles_waited {0};
+    size_t producer_backoff_events        {0};
+    size_t producer_backoff_cycles_waited {0};
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -148,12 +148,12 @@ struct ExponentialBackoff {
         : MIN_WAIT_CYCLES(min_wait), current_wait(min_wait) {}
 
     // Pause locally, then increase wait time for the next attempt.
-    inline void pause(std::atomic<size_t>& events_counter,
-                      std::atomic<size_t>& cycles_counter) noexcept
+    inline void pause(size_t& events_counter,
+                      size_t& cycles_counter) noexcept
     {
         cpu_relax_for_cycles(current_wait);
-        events_counter.fetch_add(1, std::memory_order_relaxed);
-        cycles_counter.fetch_add(current_wait, std::memory_order_relaxed);
+        events_counter++;
+        cycles_counter+= current_wait;
         current_wait = std::min(current_wait * 2, MAX_WAIT_CYCLES);
     }
 
@@ -199,7 +199,7 @@ public:
     // ────────────────────────────────────────────────────────────────
     bool enqueue(const Entry& in, bool debug = false)
     {
-        static thread_local ExponentialBackoff backoff_full{256};
+        static thread_local ExponentialBackoff backoff_full{128};
         ++metrics.enqueue_calls;
 
         uint32_t slot = head_.load(std::memory_order_relaxed);
@@ -316,18 +316,18 @@ public:
                            std::ostream&      os = std::cout) const
     {
         os << "── Metrics [" << label << "] ─────────────────────\n"
-           << "Enqueue calls           : " << metrics.enqueue_calls.load()    << '\n'
-           << "Dequeue calls           : " << metrics.dequeue_calls.load()    << '\n'
-           << "CXL-tail reads (P)      : " << metrics.read_cxl_tail.load()    << '\n'
-           << "Queue-full events (P)   : " << metrics.queue_full.load()       << '\n'
-           << "No-new-item polls (C)   : " << metrics.no_new_items.load()     << '\n'
-           << "Checksum failures (C)   : " << metrics.checksum_failed.load()  << '\n'
-           << "Tail flushes (C)        : " << metrics.flush_tail.load()       << '\n'
+           << "Enqueue calls           : " << metrics.enqueue_calls    << '\n'
+           << "Dequeue calls           : " << metrics.dequeue_calls    << '\n'
+           << "CXL-tail reads (P)      : " << metrics.read_cxl_tail    << '\n'
+           << "Queue-full events (P)   : " << metrics.queue_full       << '\n'
+           << "No-new-item polls (C)   : " << metrics.no_new_items     << '\n'
+           << "Checksum failures (C)   : " << metrics.checksum_failed  << '\n'
+           << "Tail flushes (C)        : " << metrics.flush_tail       << '\n'
            << "── Back-off ──────────────────────────\n"
-           << "Producer Events         : " << metrics.producer_backoff_events.load() << '\n'
-           << "Producer Cycles Waited  : " << metrics.producer_backoff_cycles_waited.load() << '\n'
-           << "Consumer Events         : " << metrics.consumer_backoff_events.load() << '\n'
-           << "Consumer Cycles Waited  : " << metrics.consumer_backoff_cycles_waited.load() << '\n';
+           << "Producer Events         : " << metrics.producer_backoff_events << '\n'
+           << "Producer Cycles Waited  : " << metrics.producer_backoff_cycles_waited << '\n'
+           << "Consumer Events         : " << metrics.consumer_backoff_events << '\n'
+           << "Consumer Cycles Waited  : " << metrics.consumer_backoff_cycles_waited << '\n';
     }
 
 private:
