@@ -13,7 +13,7 @@
 #error "This queue implementation requires AVX-512F for 64-byte stream ops"
 #endif
 
-#include <atomic>
+// #include <atomic>
 #include <cassert>
 #include <cstdint>
 #include <cstring>
@@ -190,8 +190,8 @@ struct ExponentialBackoff {
                       size_t& cycles_counter) noexcept
     {
         cpu_relax_for_cycles(current_wait);
-        events_counter++;
-        cycles_counter+= current_wait;
+        // events_counter++;
+        // cycles_counter+= current_wait;
         current_wait = std::min(current_wait * 2, MAX_WAIT_CYCLES);
     }
 
@@ -214,7 +214,8 @@ public:
           head_(0),
           shadow_tail_(0),
           tail_(0),
-          cxl_tail_(cxl_tail)
+          cxl_tail_(cxl_tail),
+          expected_epoch_consumer(1)
     {
         /* verify 64-byte alignment */
         assert((reinterpret_cast<std::uintptr_t>(ring_)    & 63u) == 0 &&
@@ -239,15 +240,16 @@ public:
     {
         static thread_local ExponentialBackoff backoff_full{128};
 
-        uint32_t slot = head_.load(std::memory_order_relaxed);
-        const uint32_t cap = 1u << order_;
-        ++metrics.enqueue_calls;
+        // uint32_t slot = head_.load(std::memory_order_relaxed);
+        // uint32_t slot = head_;
+        static const uint32_t cap = 1u << order_;
+        // ++metrics.enqueue_calls;
 
         /* fast check: ring looks full? */
-        if (static_cast<int32_t>(slot - shadow_tail_) >=
+        if (static_cast<int32_t>(head_ - shadow_tail_) >=
             static_cast<int32_t>(cap))
         {
-            ++metrics.read_cxl_tail;
+            // ++metrics.read_cxl_tail;
             // if (debug)
             //     std::osyncstream(std::cout)
             //         << "[enqueue] ring-full slot=" << slot
@@ -258,10 +260,10 @@ public:
             shadow_tail_ = static_cast<uint32_t>(load_fresh_u64(cxl_tail_));
 
             /* still full after refresh → backoff and give up */
-            if (static_cast<int32_t>(slot - shadow_tail_) >=
+            if (static_cast<int32_t>(head_ - shadow_tail_) >=
                 static_cast<int32_t>(cap))
             {
-                ++metrics.queue_full;
+                // ++metrics.queue_full;
                 backoff_full.pause(metrics.producer_backoff_events,
                                    metrics.producer_backoff_cycles_waited);
                 // if (debug)
@@ -275,14 +277,15 @@ public:
         backoff_full.reset();
 
         /* prepare entry (checksum over 64 B) */
-        in.meta.f.epoch    = static_cast<uint8_t>(slot >> order_) + 1;
+        in.meta.f.epoch    = static_cast<uint8_t>(head_ >> order_) + 1;
         in.meta.f.checksum = 0;
         in.meta.f.checksum = xor_checksum64(&in);
 
-        store_nt_64B(&ring_[slot & mask_], &in);
+        store_nt_64B(&ring_[head_ & mask_], &in);
         _mm_sfence();                       // order NT-store
 
-        head_.store(slot + 1, std::memory_order_release);
+        // head_.store(slot + 1, std::memory_order_release);
+        head_++;
         return true;
     }
 
@@ -291,18 +294,18 @@ public:
     // ────────────────────────────────────────────────────────────────
     bool dequeue(Entry& out, bool debug = false)
     {
-        static thread_local ExponentialBackoff backoff_empty{50};
+        static thread_local ExponentialBackoff backoff_empty{128};
         static thread_local ExponentialBackoff backoff_checksum{100};
-        ++metrics.dequeue_calls;
+        // ++metrics.dequeue_calls;
 
         load_fresh_64B(&out, &ring_[tail_ & mask_]);
 
-        const uint8_t expected_epoch =
-            static_cast<uint8_t>(tail_ >> order_) + 1;
+        const uint8_t expected_epoch = expected_epoch_consumer;
+            
 
         /* epoch mismatch → nothing new yet */
         if (out.meta.f.epoch != expected_epoch) {
-            ++metrics.no_new_items;
+            // ++metrics.no_new_items;
             backoff_empty.pause(metrics.consumer_backoff_events,
                                 metrics.consumer_backoff_cycles_waited);
             // if (debug)
@@ -315,7 +318,7 @@ public:
 
         /* checksum mismatch */
         if (!verify_checksum(&out)) {
-            ++metrics.checksum_failed;
+            // ++metrics.checksum_failed;
             backoff_checksum.pause(metrics.consumer_backoff_events,
                                    metrics.consumer_backoff_cycles_waited);
             // if (debug)
@@ -330,9 +333,12 @@ public:
         backoff_checksum.reset();
 
         /* flush tail back every (cap/4) dequeues, minimum 1 */
+        
         const uint32_t flush_interval = std::max(1u, (1u << order_) / 4);
-        if ((tail_ & (flush_interval - 1)) == 0)
+        if ((tail_ & (flush_interval - 1)) == 0) {
             flush_tail(debug);
+            expected_epoch_consumer = static_cast<uint8_t>(tail_ >> order_) + 1;
+        }
 
         return true;
     }
@@ -372,7 +378,7 @@ private:
     inline void flush_tail(bool debug = false)
     {
         store_nt_u64(cxl_tail_, tail_);
-        ++metrics.flush_tail;
+        // ++metrics.flush_tail;
 
         // if (debug)
         //     std::osyncstream(std::cout)
@@ -383,12 +389,13 @@ private:
     Entry* const              ring_;
     const uint32_t            order_;
     const uint32_t            mask_;
-    std::atomic<uint32_t>     head_;
+    alignas(64) uint32_t     head_;
     uint32_t                  shadow_tail_;
     
-    uint32_t                  tail_;
-    uint64_t* const           cxl_tail_;
+    alignas(64) uint32_t                  tail_;
+    uint8_t                   expected_epoch_consumer;
+    alignas(64) uint64_t* const           cxl_tail_;
 
     /* metrics block ------------------------------------------------- */
-    Metrics                   metrics;
+    alignas(64) Metrics                   metrics;
 };
