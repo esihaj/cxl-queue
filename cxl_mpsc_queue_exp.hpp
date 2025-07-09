@@ -175,31 +175,33 @@ struct Metrics {
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct ExponentialBackoff {
-    // Max wait is shared, but min wait is configurable per instance
-    static constexpr uint32_t MAX_WAIT_CYCLES = 16384;
-    const uint32_t MIN_WAIT_CYCLES;
+  // Per-instance limits (default max = 16 384 cycles).
+  const uint32_t min_wait_cycles_;
+  const uint32_t max_wait_cycles_;
 
-    uint32_t current_wait;
+  uint32_t current_wait_;
 
-    // Constructor to allow different minimum wait times
-    explicit ExponentialBackoff(uint32_t min_wait)
-        : MIN_WAIT_CYCLES(min_wait), current_wait(min_wait) {}
+  explicit ExponentialBackoff(uint32_t min_wait,
+                              uint32_t max_wait = 16'384)
+      : min_wait_cycles_(min_wait),
+        max_wait_cycles_(max_wait),
+        current_wait_(min_wait) {}
 
-    // Pause locally, then increase wait time for the next attempt.
-    inline void pause(size_t& events_counter,
-                      size_t& cycles_counter) noexcept
-    {
-        cpu_relax_for_cycles(current_wait);
-        // events_counter++;
-        // cycles_counter+= current_wait;
-        current_wait = std::min(current_wait * 2, MAX_WAIT_CYCLES);
-    }
+  // Pause locally, then increase wait time for the next attempt.
+  inline void pause(size_t& events_counter,
+                    size_t& cycles_counter) noexcept {
+    cpu_relax_for_cycles(current_wait_);
+    ++events_counter;
+    cycles_counter += current_wait_;
+    current_wait_ = std::min(current_wait_ * 2, max_wait_cycles_);
+  }
 
-    // Reset the wait time after a successful operation.
-    inline void reset() noexcept {
-        current_wait = MIN_WAIT_CYCLES;
-    }
+  // Reset the wait time after a successful operation.
+  inline void reset() noexcept {
+    current_wait_ = min_wait_cycles_;
+  }
 };
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Queue class
@@ -207,7 +209,7 @@ struct ExponentialBackoff {
 
 class CxlMpscQueue {
 public:
-    CxlMpscQueue(Entry* ring, uint32_t order_log2, uint64_t* cxl_tail)
+    CxlMpscQueue(Entry* ring, uint32_t order_log2, uint64_t* cxl_tail, uint32_t min_backoff = 128, uint32_t max_backoff = 16'384)
         : ring_(ring),
           order_(order_log2),
           mask_((1u << order_log2) - 1),
@@ -215,7 +217,8 @@ public:
           shadow_tail_(0),
           tail_(0),
           cxl_tail_(cxl_tail),
-          expected_epoch_consumer(1)
+          expected_epoch_consumer(1),
+          backoff_empty(min_backoff, max_backoff)
     {
         /* verify 64-byte alignment */
         assert((reinterpret_cast<std::uintptr_t>(ring_)    & 63u) == 0 &&
@@ -243,13 +246,13 @@ public:
         // uint32_t slot = head_.load(std::memory_order_relaxed);
         // uint32_t slot = head_;
         static const uint32_t cap = 1u << order_;
-        // ++metrics.enqueue_calls;
+        ++metrics.enqueue_calls;
 
         /* fast check: ring looks full? */
         if (static_cast<int32_t>(head_ - shadow_tail_) >=
             static_cast<int32_t>(cap))
         {
-            // ++metrics.read_cxl_tail;
+            ++metrics.read_cxl_tail;
             // if (debug)
             //     std::osyncstream(std::cout)
             //         << "[enqueue] ring-full slot=" << slot
@@ -263,7 +266,7 @@ public:
             if (static_cast<int32_t>(head_ - shadow_tail_) >=
                 static_cast<int32_t>(cap))
             {
-                // ++metrics.queue_full;
+                ++metrics.queue_full;
                 backoff_full.pause(metrics.producer_backoff_events,
                                    metrics.producer_backoff_cycles_waited);
                 // if (debug)
@@ -294,9 +297,9 @@ public:
     // ────────────────────────────────────────────────────────────────
     bool dequeue(Entry& out, bool debug = false)
     {
-        static thread_local ExponentialBackoff backoff_empty{128};
-        static thread_local ExponentialBackoff backoff_checksum{100};
-        // ++metrics.dequeue_calls;
+        // static ExponentialBackoff backoff_empty{128};
+        static ExponentialBackoff backoff_checksum{100};
+        ++metrics.dequeue_calls;
 
         load_fresh_64B(&out, &ring_[tail_ & mask_]);
 
@@ -305,7 +308,7 @@ public:
 
         /* epoch mismatch → nothing new yet */
         if (out.meta.f.epoch != expected_epoch) {
-            // ++metrics.no_new_items;
+            ++metrics.no_new_items;
             backoff_empty.pause(metrics.consumer_backoff_events,
                                 metrics.consumer_backoff_cycles_waited);
             // if (debug)
@@ -318,7 +321,7 @@ public:
 
         /* checksum mismatch */
         if (!verify_checksum(&out)) {
-            // ++metrics.checksum_failed;
+            ++metrics.checksum_failed;
             backoff_checksum.pause(metrics.consumer_backoff_events,
                                    metrics.consumer_backoff_cycles_waited);
             // if (debug)
@@ -378,7 +381,7 @@ private:
     inline void flush_tail(bool debug = false)
     {
         store_nt_u64(cxl_tail_, tail_);
-        // ++metrics.flush_tail;
+        ++metrics.flush_tail;
 
         // if (debug)
         //     std::osyncstream(std::cout)
@@ -398,4 +401,5 @@ private:
 
     /* metrics block ------------------------------------------------- */
     alignas(64) Metrics                   metrics;
+    ExponentialBackoff backoff_empty;
 };

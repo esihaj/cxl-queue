@@ -50,10 +50,26 @@ using Steady = std::chrono::steady_clock;
 int main(int argc, char* argv[])
 {
     // ───── parse arguments ────────────────────────────────────────────────
-    if (argc < 4) { print_usage(argv[0]); return 1; }
+    //  Required layout (iters is optional, min/max are *always* last):
+    //
+    //    pin <cpu> dax                     [iters] <min_backoff> <max_backoff>
+    //    pin <cpu> numa <node>             [iters] <min_backoff> <max_backoff>
+    //
 
-    if (std::string_view(argv[1]) != "pin") { print_usage(argv[0]); return 1; }
+    if (argc < 6) {         // smallest valid form is “pin cpu dax min max”
+        print_usage(argv[0]);
+        return 1;
+    }
+
+    if (std::string_view(argv[1]) != "pin") {
+        print_usage(argv[0]);
+        return 1;
+    }
     const unsigned client_cpu = std::stoul(argv[2]);
+
+    // Back-off parameters are *always* the final two arguments.
+    const uint32_t min_backoff = static_cast<uint32_t>(std::stoul(argv[argc - 2]));
+    const uint32_t max_backoff = static_cast<uint32_t>(std::stoul(argv[argc - 1]));
 
     std::unique_ptr<cxl::CxlAllocator> alloc;
     size_t iters = 1'000'000;
@@ -61,31 +77,43 @@ int main(int argc, char* argv[])
     const std::string_view mem_kind = argv[3];
 
     if (mem_kind == "numa") {
-        if (argc < 5) { print_usage(argv[0]); return 1; }
+        if (argc < 7) {         // need at least: pin cpu numa node min max
+            print_usage(argv[0]);
+            return 1;
+        }
+
         const int numa_node = std::stoi(argv[4]);
-        if (argc >= 6) iters = std::stoull(argv[5]);
+
+        // iters, if present, is the argument immediately before min_backoff
+        if (5 < argc - 2) {
+            iters = std::stoull(argv[5]);
+        }
+
         alloc = std::make_unique<cxl::NumaAllocator>(numa_node);
         std::cout << "Allocator: NUMA node " << numa_node << '\n';
-    }
-    else if (mem_kind == "dax") {
-        if (argc >= 5) iters = std::stoull(argv[4]);
-        alloc = std::make_unique<cxl::DaxAllocator>();           // default /dev/dax1.0
+    } else if (mem_kind == "dax") {
+        // iters is optional and precedes min_backoff if supplied.
+        if (4 < argc - 2) {
+            iters = std::stoull(argv[4]);
+        }
+
+        alloc = std::make_unique<cxl::DaxAllocator>();  // default /dev/dax1.0
         std::cout << "Allocator: DAX (/dev/dax1.0 slice)\n";
-    }
-    else {
-        print_usage(argv[0]); return 1;
+    } else {
+        print_usage(argv[0]);
+        return 1;
     }
 
     std::cout << "Client pinned to CPU " << client_cpu << '\n';
     std::cout << "Iterations           : " << iters << '\n';
-
+    std::cout << "Back-off (min,max)   : " << min_backoff << ", " << max_backoff << " cycles\n";
 
     const size_t cap = 1u << ORDER;
 
     // ───── allocate queue memory via CXL allocator ───────────────────────
-    Entry*     req_ring = static_cast<Entry*>   (alloc->allocate_aligned(sizeof(Entry) * cap));
+    Entry*     req_ring = static_cast<Entry*>(alloc->allocate_aligned(sizeof(Entry) * cap));
     uint64_t*  req_tail = static_cast<uint64_t*>(alloc->allocate_aligned(64));
-    Entry*     rsp_ring = static_cast<Entry*>   (alloc->allocate_aligned(sizeof(Entry) * cap));
+    Entry*     rsp_ring = static_cast<Entry*>(alloc->allocate_aligned(sizeof(Entry) * cap));
     uint64_t*  rsp_tail = static_cast<uint64_t*>(alloc->allocate_aligned(64));
 
     std::memset(req_ring, 0, sizeof(Entry) * cap);
@@ -94,8 +122,8 @@ int main(int argc, char* argv[])
     std::memset(rsp_tail, 0, 64);
 
     // ───── construct queues ──────────────────────────────────────────────
-    CxlMpscQueue q_req(req_ring, ORDER, req_tail);   // client → server
-    CxlMpscQueue q_rsp(rsp_ring, ORDER, rsp_tail);   // server → client
+    CxlMpscQueue q_req(req_ring, ORDER, req_tail, min_backoff, max_backoff);  // client → server
+    CxlMpscQueue q_rsp(rsp_ring, ORDER, rsp_tail, min_backoff, max_backoff);  // server → client
 
     std::atomic<bool> server_ready{false};
 
