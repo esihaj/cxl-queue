@@ -3,8 +3,10 @@ doorbell_bench
 cxl_mpsc_queue
 test_mpsc_queue
 cxl_ping_pong
+backoff_bench
 
 perf.data
+perf.data.old
 
 # Ignore common temporary or backup files
 *.s
