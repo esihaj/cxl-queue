@@ -26,7 +26,7 @@ HEADERS := cxl_allocator.hpp cxl_mpsc_queue.hpp   # queue implementation
 #  Binaries (unchanged simple one-liners)
 # ---------------------------------------------------------------------------
 .PHONY: all clean
-all: doorbell_bench cxl_mpsc_queue test_mpsc_queue cxl_ping_pong backoff_bench
+all: doorbell_bench cxl_mpsc_queue test_mpsc_queue cxl_ping_pong backoff_bench json_bench
 
 backoff_bench: backoff_bench.cpp
 	$(CXX) $(CXXFLAGS_COMMON) $< -o $@ $(LDFLAGS)
@@ -49,9 +49,12 @@ test_mpsc_queue: test_mpsc_queue.cpp $(HEADERS)
 cxl_ping_pong: cxl_ping_pong.cpp $(HEADERS)
 	$(CXX) $(CXXFLAGS_COMMON) $< -o $@ $(LDFLAGS)
 
+json_bench: json_bench.cpp
+	$(CXX) $(CXXFLAGS_COMMON) $< -o $@ $(LDFLAGS)
+
 # ---------------------------------------------------------------------------
 #  House-keeping
 # ---------------------------------------------------------------------------
 clean:
-	rm -f doorbell_bench cxl_mpsc_queue test_mpsc_queue cxl_ping_pong backoff_bench
+	rm -f doorbell_bench cxl_mpsc_queue test_mpsc_queue cxl_ping_pong backoff_bench json_bench
 	rm -f doorbell_benchmark.s

@@ -4,6 +4,7 @@ cxl_mpsc_queue
 test_mpsc_queue
 cxl_ping_pong
 backoff_bench
+json_bench
 
 perf.data
 perf.data.old
