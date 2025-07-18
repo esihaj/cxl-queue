@@ -1,18 +1,18 @@
 /*
  * Serialization/Deserialization Latency Benchmark — Complex Payloads
  * ------------------------------------------------------------------
- * Measures average per‑operation latency (nanoseconds) for
+ * Measures average per‑operation latency (microseconds) for
  * • complex heterogeneous flat objects, and
- * • nested tree structures of a target total size.
- * Payload sizes: 64 B, 256 B, 512 B, 1 KiB, 2 KiB,
- * 4 KiB, 8 KiB, 32 KiB, 1 MiB.
+ * • nested tree structures based on a specific progression of node counts.
+ *
+ * Tree structures are generated with a balanced shape for each node count.
  *
  * Library‑agnostic via `JsonLibrary`; default implementation uses
  * **nlohmann::json**. Swap codecs by subclassing and re‑compiling.
  *
  * Build (example):
  * g++ -O3 -std=c++20 -march=native -I/path/to/nlohmann \
- * serialization_benchmark.cpp -o ser_bench
+ * serialization_benchmark_final.cpp -o ser_bench
  * Run:
  * ./ser_bench
  */
@@ -29,6 +29,7 @@
 #include <vector>
 #include <functional> // Required for std::function
 #include <algorithm>  // Required for std::min/max
+#include <deque>      // Used for BFS tree generation
 
 // ────────────────────────────────────────────────────────────────
 //  RNG helpers
@@ -81,7 +82,7 @@ inline void from_json(const nlohmann::json& j, ComplexPayload& p) {
 struct TreeNode {
     int32_t              id;
     std::string          label;
-    std::vector<uint8_t> blob; // Using uint8_t to match random_blob
+    std::vector<uint8_t> blob;
     std::vector<TreeNode> children;
 
     // Default constructor
@@ -122,69 +123,63 @@ inline void from_json(const nlohmann::json& j, TreeNode& n) {
 }
 
 /**
- * @brief Creates a tree with a total memory footprint approximating the target size.
+ * @brief Creates a tree with a specified structure.
  *
- * This function is designed for benchmarking. It iteratively adds nodes only if
- * the budget allows, creating a representative structure for the target size.
+ * This function builds a tree with a target number of nodes, respecting
+ * constraints on maximum depth and children per node. It uses a breadth-first
+ * strategy to add nodes level by level.
  *
- * @param total_bytes The desired total size of the tree in bytes.
+ * @param total_nodes The target number of nodes for the entire tree.
+ * @param max_depth The maximum depth of the tree.
+ * @param max_children The maximum number of children any single node can have.
+ * @param node_data_size The size of the data blob in each node.
  * @return The root node of the generated tree.
  */
-TreeNode make_tree_of_size(std::size_t total_bytes) {
-    // --- Constants ---
-    const std::size_t label_size = 8;
-    const int max_nodes_for_structure = 100;
+TreeNode make_tree_by_structure(int total_nodes, int max_depth, int max_children, size_t node_data_size) {
+    if (total_nodes <= 0) return {};
 
-    std::vector<TreeNode> node_pool;
-    std::size_t remaining_budget = total_bytes;
+    std::uniform_int_distribution<int32_t> id_dist(0, 1'000'000);
+    std::uniform_int_distribution<int> child_count_dist(1, std::max(1, max_children));
+    const size_t label_size = 16;
+    
+    TreeNode root;
+    root.id = id_dist(rng);
+    root.label = random_ascii(label_size);
+    root.blob = random_blob(node_data_size);
 
-    // --- Iterative Node Creation ---
-    // This loop accurately budgets by measuring the actual overhead of each node
-    // before committing it to the tree structure.
-    while (node_pool.size() < max_nodes_for_structure) {
-        // Create a temporary node to measure its real overhead.
-        TreeNode temp_node;
-        temp_node.label = random_ascii(label_size);
-        
-        // The actual overhead includes the object size and the heap-allocated string capacity.
-        const std::size_t actual_overhead = sizeof(TreeNode) + temp_node.label.capacity();
+    int nodes_created = 1;
+    if (nodes_created >= total_nodes) return root;
 
-        if (remaining_budget >= actual_overhead) {
-            remaining_budget -= actual_overhead;
-            node_pool.push_back(std::move(temp_node));
-        } else {
-            // Not enough budget for another node.
-            break;
+    // Queue of {parent_node, current_depth} for BFS construction
+    std::deque<std::pair<TreeNode*, int>> parent_queue;
+    parent_queue.push_back({&root, 1});
+
+    while (nodes_created < total_nodes && !parent_queue.empty()) {
+        auto [parent_node, current_depth] = parent_queue.front();
+        parent_queue.pop_front();
+
+        if (current_depth >= max_depth) continue;
+
+        // Determine how many children to add to this parent
+        int num_children_to_add = child_count_dist(rng);
+        // Ensure we don't exceed the total node count
+        num_children_to_add = std::min(num_children_to_add, total_nodes - nodes_created);
+
+        parent_node->children.reserve(num_children_to_add);
+        for (int i = 0; i < num_children_to_add; ++i) {
+            TreeNode new_node;
+            new_node.id = id_dist(rng);
+            new_node.label = random_ascii(label_size);
+            new_node.blob = random_blob(node_data_size);
+            
+            parent_node->children.push_back(std::move(new_node));
+            nodes_created++;
         }
-    }
-    
-    // If the budget was too small for even one node, ensure we have at least a root.
-    if (node_pool.empty()) {
-        node_pool.emplace_back();
-        node_pool[0].label = random_ascii(label_size);
-        remaining_budget = 0;
-    }
-
-    // --- Memory Distribution ---
-    // Distribute the final remaining budget as blob data across all created nodes.
-    const std::size_t blob_each = node_pool.empty() ? 0 : remaining_budget / node_pool.size();
-
-    // --- Tree Construction ---
-    std::uniform_int_distribution<int32_t> dist32(0, 1'000'000);
-    
-    // Configure all nodes in the pool with ID and blob data (label is already set).
-    for(auto& node : node_pool) {
-        node.id = dist32(rng);
-        node.blob = random_blob(blob_each);
-    }
-    
-    // Assemble the tree: the first node is the root, the rest are its children.
-    TreeNode root = std::move(node_pool[0]);
-    if (node_pool.size() > 1) {
-        root.children.reserve(node_pool.size() - 1);
-        // Move the remaining nodes from the pool to be children of the root.
-        for (size_t i = 1; i < node_pool.size(); ++i) {
-            root.children.push_back(std::move(node_pool[i]));
+        
+        // Add the newly created children to the queue to become parents themselves
+        for (auto& child : parent_node->children) {
+            if (nodes_created >= total_nodes) break;
+            parent_queue.push_back({&child, current_depth + 1});
         }
     }
 
@@ -193,7 +188,7 @@ TreeNode make_tree_of_size(std::size_t total_bytes) {
 
 
 // ────────────────────────────────────────────────────────────────
-//  Size Calculation Helpers
+//  Size/Node Calculation Helpers
 // ────────────────────────────────────────────────────────────────
 
 // Calculates the actual in-memory size of a flat payload.
@@ -205,19 +200,30 @@ std::size_t calculate_flat_size(const ComplexPayload& p) {
     return current_size;
 }
 
-
-// Calculates the actual in-memory size of a tree.
+// Recursively calculates the actual in-memory size of a tree.
 std::size_t calculate_tree_size(const TreeNode& n) {
     std::size_t current_size = sizeof(n);
     current_size += n.label.capacity();
     current_size += n.blob.capacity();
+    current_size += n.children.capacity() * sizeof(TreeNode);
     
     for (const auto& child : n.children) {
         current_size += calculate_tree_size(child);
     }
-    current_size += n.children.capacity() * sizeof(TreeNode);
     return current_size;
 }
+
+// Recursively counts the number of nodes in a tree.
+std::size_t count_nodes(const TreeNode& n) {
+    // An empty node (from a failed creation) shouldn't be counted.
+    if (n.label.empty() && n.id == 0) return 0;
+    std::size_t count = 1; // Count this node
+    for (const auto& child : n.children) {
+        count += count_nodes(child);
+    }
+    return count;
+}
+
 
 // ────────────────────────────────────────────────────────────────
 //  Library‑agnostic interface
@@ -248,7 +254,7 @@ public:
 };
 
 // ────────────────────────────────────────────────────────────────
-//  Timing helper — use alias distinct from libc clock_t
+//  Timing helper
 // ────────────────────────────────────────────────────────────────
 using HighResClock = std::chrono::high_resolution_clock;
 
@@ -266,27 +272,24 @@ static double average_ns(F&& fn, std::size_t iterations) {
 int main() {
     std::unique_ptr<JsonLibrary> lib = std::make_unique<NlohmannJsonLib>();
 
-    struct SizeCase { const char* label; std::size_t bytes; };
-    const std::vector<SizeCase> cases = {
-        {"64B",   64},
-        {"256B",  256},
-        {"512B",  512},
-        {"1KiB",  1024},
-        {"2KiB",  2048},
-        {"4KiB",  4 * 1024},
-        {"8KiB",  8 * 1024},
-        {"32KiB", 32 * 1024},
-        {"1MiB",  1 * 1024 * 1024}
-    };
-
-    std::cout << std::fixed << std::setprecision(1);
+    std::cout << std::fixed << std::setprecision(2);
+    
+    // --- Iteration Info ---
+    std::cout << "\n--- Iteration Counts ---\n";
+    std::cout << "Flat Objects: 100,000 (for sizes < 16KiB), 10,000 (for sizes >= 16KiB)\n";
+    std::cout << "Trees: 50,000 (< 64 nodes), 10,000 (64-511 nodes), 1,000 (>= 512 nodes)\n";
 
     // --- Flat Object Benchmark ---
+    struct SizeCase { const char* label; std::size_t bytes; };
+    const std::vector<SizeCase> flat_cases = {
+        {"64B",   64}, {"256B",  256}, {"512B",  512}, {"1KiB",  1024},
+        {"4KiB",  4 * 1024}, {"16KiB", 16 * 1024}, {"64KiB", 64 * 1024}
+    };
     std::cout << "\n--- Flat Object Benchmark (nlohmann::json) ---\n";
-    std::cout << "Target\tActual\t\tSerialize\tDeserialize\n";
-    std::cout << "------\t------\t\t---------\t-----------\n";
-    for (const auto& [label, bytes] : cases) {
-        const std::size_t iters = bytes >= 32 * 1024 ? 1000 : (bytes <= 2048 ? 100'000 : 10'000);
+    std::cout << "Target Size\tActual Size\tIterations\tSerialize (μs)\tDeserialize (μs)\n";
+    std::cout << "-----------\t-----------\t----------\t--------------\t----------------\n";
+    for (const auto& [label, bytes] : flat_cases) {
+        const std::size_t iters = bytes >= 16 * 1024 ? 10'000 : 100'000;
 
         ComplexPayload flat;
         flat.id = 42;
@@ -294,32 +297,51 @@ int main() {
         flat.score = 2.71828;
         flat.active = true;
         flat.values = {1,2,3,4,5,6,7};
-        // Adjust data size to approximate the target size
         const size_t flat_overhead = calculate_flat_size(flat);
         flat.data = random_blob(bytes > flat_overhead ? bytes - flat_overhead : 0);
 
-        const double ser_flat = average_ns([&]{ lib->serialize(flat); }, iters);
+        const double ser_flat_ns = average_ns([&]{ lib->serialize(flat); }, iters);
         const std::string flat_str = lib->serialize(flat);
-        const double des_flat = average_ns([&]{ lib->deserialize_complex(flat_str); }, iters);
+        const double des_flat_ns = average_ns([&]{ lib->deserialize_complex(flat_str); }, iters);
         
-        std::cout << label << "\t" << calculate_flat_size(flat) << "B\t\t" << ser_flat << "\t\t" << des_flat << "\n";
+        std::cout << label << "\t\t" << calculate_flat_size(flat) << "B\t\t" << iters << "\t\t" 
+                  << ser_flat_ns / 1000.0 << "\t\t" << des_flat_ns / 1000.0 << "\n";
     }
 
     // --- Tree Benchmark ---
-    std::cout << "\n--- Tree Benchmark (nlohmann::json) ---\n";
-    std::cout << "Target\tActual\t\tNodes\tSerialize\tDeserialize\n";
-    std::cout << "------\t------\t\t-----\t---------\t-----------\n";
-    for (const auto& [label, bytes] : cases) {
-        const std::size_t iters = bytes >= 32 * 1024 ? 1000 : (bytes <= 2048 ? 100'000 : 10'000);
+    struct TreeStructureCase {
+        const char* label;
+        int total_nodes;
+        int max_depth;
+        int max_children;
+        size_t node_data_size;
+    };
+    const std::vector<TreeStructureCase> tree_cases = {
+        {"1 Node",       1,   2, 2, 128},
+        {"4 Nodes",      4,   3, 3, 128},
+        {"8 Nodes",      8,   4, 3, 128},
+        {"32 Nodes",    32,   5, 4, 128},
+        {"64 Nodes",    64,   6, 4, 128},
+        {"128 Nodes",  128,   7, 5, 128},
+        {"256 Nodes",  256,   8, 5, 128},
+        {"512 Nodes",  512,   9, 6, 128},
+        {"1000 Nodes", 1000, 10, 7, 128},
+    };
 
-        TreeNode tree = make_tree_of_size(bytes);
-        const double ser_tree = average_ns([&]{ lib->serialize(tree); }, iters);
+    std::cout << "\n--- Tree Benchmark (nlohmann::json) ---\n";
+    std::cout << "Structure \tNodes\tTotal Tree Size (KiB)\tIterations\tSerialize (μs)\tDeserialize (μs)\n";
+    std::cout << "----------\t-----\t---------------------\t----------\t--------------\t----------------\n";
+    for (const auto& tc : tree_cases) {
+        const std::size_t iters = tc.total_nodes >= 512 ? 1000 : (tc.total_nodes >= 64 ? 10'000 : 50'000);
+
+        TreeNode tree = make_tree_by_structure(tc.total_nodes, tc.max_depth, tc.max_children, tc.node_data_size);
+        const double ser_tree_ns = average_ns([&]{ lib->serialize(tree); }, iters);
         const std::string tree_str = lib->serialize(tree);
-        const double des_tree = average_ns([&]{ lib->deserialize_tree(tree_str); }, iters);
+        const double des_tree_ns = average_ns([&]{ lib->deserialize_tree(tree_str); }, iters);
         
-        std::cout << label << "\t" << calculate_tree_size(tree) << "B\t\t" 
-                  << (1 + tree.children.size()) << "\t"
-                  << ser_tree << "\t\t" << des_tree << "\n";
+        std::cout << tc.label << "\t" << count_nodes(tree) << "\t"
+                  << static_cast<double>(calculate_tree_size(tree)) / 1024.0 << "\t\t\t"
+                  << iters << "\t\t" << ser_tree_ns / 1000.0 << "\t\t" << des_tree_ns / 1000.0 << "\n";
     }
 
     return 0;
