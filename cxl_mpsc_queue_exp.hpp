@@ -209,7 +209,8 @@ struct ExponentialBackoff {
 
 class CxlMpscQueue {
 public:
-    CxlMpscQueue(Entry* ring, uint32_t order_log2, uint64_t* cxl_tail, uint32_t min_backoff = 128, uint32_t max_backoff = 16'384)
+     CxlMpscQueue(Entry* ring, uint32_t order_log2, uint64_t* cxl_tail, 
+                 bool do_initialize = true, uint32_t min_backoff = 128, uint32_t max_backoff = 16'384)
         : ring_(ring),
           order_(order_log2),
           mask_((1u << order_log2) - 1),
@@ -227,8 +228,12 @@ public:
                "cxl_tail_ is not 64-byte aligned");
         static_assert(alignof(Entry) == 64, "Entry must be alignas(64)");
 
-        std::memset(ring_, 0, sizeof(Entry) * (1u << order_));
-        store_nt_u64(cxl_tail_, tail_);
+        // The producer process is responsible for initializing the memory.
+        // The consumer process attaches to the already-initialized memory.
+        if (do_initialize) {
+            std::memset(ring_, 0, sizeof(Entry) * (1u << order_));
+            store_nt_u64(cxl_tail_, tail_);
+        }
     }
 
     [[nodiscard]] std::size_t capacity() const noexcept
