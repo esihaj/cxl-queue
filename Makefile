@@ -26,7 +26,7 @@ HEADERS := cxl_allocator.hpp cxl_mpsc_queue.hpp   # queue implementation
 #  Binaries (unchanged simple one-liners)
 # ---------------------------------------------------------------------------
 .PHONY: all clean
-all: doorbell_bench cxl_mpsc_queue test_mpsc_queue cxl_ping_pong backoff_bench json_bench
+all: doorbell_bench cxl_mpsc_queue test_mpsc_queue cxl_ping_pong backoff_bench json_bench two_mpsc_queue
 
 backoff_bench: backoff_bench.cpp
 	$(CXX) $(CXXFLAGS_COMMON) $< -o $@ $(LDFLAGS)
@@ -43,6 +43,9 @@ doorbell_benchmark.s: doorbell_benchmark.cpp $(HEADERS)
 cxl_mpsc_queue: cxl_mpsc_queue.cpp $(HEADERS)
 	$(CXX) $(CXXFLAGS_COMMON) $< -o $@ $(LDFLAGS)
 
+two_mpsc_queue: two_server_cxl_mpsc_queue.cpp $(HEADERS)
+	$(CXX) $(CXXFLAGS_COMMON) $< -o $@ $(LDFLAGS)
+
 test_mpsc_queue: test_mpsc_queue.cpp $(HEADERS)
 	$(CXX) $(CXXFLAGS_COMMON) $< -o $@ $(LDFLAGS)
 
@@ -56,5 +59,5 @@ json_bench: json_bench.cpp
 #  House-keeping
 # ---------------------------------------------------------------------------
 clean:
-	rm -f doorbell_bench cxl_mpsc_queue test_mpsc_queue cxl_ping_pong backoff_bench json_bench
+	rm -f doorbell_bench cxl_mpsc_queue test_mpsc_queue cxl_ping_pong backoff_bench json_bench two_mpsc_queue
 	rm -f doorbell_benchmark.s
