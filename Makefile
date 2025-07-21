@@ -20,7 +20,7 @@ CXXFLAGS_COMMON := $(STD) $(OPT) $(THREADING) $(ISAFLAGS)
 # ---------------------------------------------------------------------------
 #  Sources / headers
 # ---------------------------------------------------------------------------
-HEADERS := cxl_allocator.hpp cxl_mpsc_queue.hpp   # queue implementation
+HEADERS := cxl_allocator.hpp cxl_mpsc_queue.hpp  cxl_mpsc_queue_exp.hpp # queue implementation
 
 # ---------------------------------------------------------------------------
 #  Binaries (unchanged simple one-liners)
