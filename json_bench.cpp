@@ -17,7 +17,7 @@
  * ./ser_bench
  */
 
-#include <nlohmann/json.hpp>
+#include "nlohmann_json.hpp"
 #include <chrono>
 #include <cmath>
 #include <cstdint>
