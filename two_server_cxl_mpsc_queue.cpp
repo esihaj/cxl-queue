@@ -134,7 +134,7 @@ int main(int argc, char* argv[]) {
         e.meta.f.seal_index = -1;
         for (std::size_t i = 0; i < WARMUP; ++i) {
             e.meta.f.rpc_id = static_cast<uint16_t>(i);
-            while (!q_producer.enqueue(e, true)) { /* spin */ }
+            while (!q_producer.enqueue(e, false)) { /* spin */ }
         }
 
         // --- Handshake ---
@@ -154,10 +154,10 @@ int main(int argc, char* argv[]) {
             
             // Loop until enqueue succeeds, with debug logging enabled.
             // The internal backoff in enqueue will prevent busy-spinning.
-            while (!q_producer.enqueue(e, true)) {}
+            while (!q_producer.enqueue(e, false)) {}
 
             // Log every successful enqueue operation.
-            std::osyncstream(std::cout) << "[producer] Successfully enqueued item " << i << ".\n";
+            // std::osyncstream(std::cout) << "[producer] Successfully enqueued item " << i << ".\n";
         }
         const auto t_prod = std::chrono::steady_clock::now() - t0;
 
@@ -196,8 +196,8 @@ int main(int argc, char* argv[]) {
             if (q_consumer.dequeue(e, true)) {
                 consumed++;
                 // Log every successful dequeue operation.
-                std::osyncstream(std::cout) << "[consumer] Successfully dequeued item #" << consumed 
-                                            << " (rpc_id: " << e.meta.f.rpc_id << ").\n";
+                // std::osyncstream(std::cout) << "[consumer] Successfully dequeued item #" << consumed 
+                //                             << " (rpc_id: " << e.meta.f.rpc_id << ").\n";
             }
         }
         const auto t_cons = std::chrono::steady_clock::now() - t0;
