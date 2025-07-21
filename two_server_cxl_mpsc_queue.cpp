@@ -151,7 +151,19 @@ int main(int argc, char* argv[]) {
         const auto t0 = std::chrono::steady_clock::now();
         for (std::size_t i = WARMUP; i < ITER; ++i) {
             e.meta.f.rpc_id = static_cast<uint16_t>(i);
-            while (!q_producer.enqueue(e)) { /* spin */ }
+            
+            if (i > WARMUP && i % 100000 == 0) {
+                std::cout << "[producer] Attempting to enqueue item " << i << "...\n";
+            }
+
+            uint64_t spin_count = 0;
+            while (!q_producer.enqueue(e)) {
+                spin_count++;
+                if (spin_count > 0 && spin_count % 10000000 == 0) { // Log every 10M failed attempts
+                    std::cout << "[producer] STUCK: Spun 10,000,000 times trying to enqueue item " << i << "\n";
+                }
+                cpu_relax_for_cycles(10);
+            }
         }
         const auto t_prod = std::chrono::steady_clock::now() - t0;
 
@@ -183,9 +195,20 @@ int main(int argc, char* argv[]) {
         // --- Timed phase ---
         Entry e{};
         std::size_t consumed = 0;
+        uint64_t attempts = 0;
         const auto t0 = std::chrono::steady_clock::now();
         while (consumed < ITER) {
-            if (q_consumer.dequeue(e)) ++consumed;
+            attempts++;
+            if (q_consumer.dequeue(e)) {
+                consumed++;
+                if (consumed > 0 && consumed % 100000 == 0) {
+                    std::cout << "[consumer] Dequeued item " << consumed << ". Total attempts: " << attempts << "\n";
+                }
+            }
+
+            if (attempts > 0 && attempts % 10000000 == 0) { // Log every 10M attempts
+                std::cout << "[consumer] STUCK?: Made " << attempts << " dequeue attempts, but only consumed " << consumed << " items.\n";
+            }
         }
         const auto t_cons = std::chrono::steady_clock::now() - t0;
 
