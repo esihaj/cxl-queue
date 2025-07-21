@@ -193,14 +193,14 @@ int main(int argc, char* argv[]) {
         while (consumed < ITER) {
             // Attempt to dequeue with debug logging enabled.
             // The internal backoff in dequeue will prevent busy-spinning.
-            if (q_consumer.dequeue(e, true)) {
-                consumed++;
+            if (q_consumer.dequeue(e)) {
                 if (e.meta.f.rpc_id != static_cast<uint16_t>(consumed)) {
                     std::osyncstream(std::cerr) << "[consumer] VERIFICATION FAILED! "
                                                 << "Expected rpc_id: " << consumed
                                                 << ", but got: " << e.meta.f.rpc_id << ".\n";
                     exit(EXIT_FAILURE); // Exit immediately on data corruption.
                 }
+                consumed++;
             }
         }
         const auto t_cons = std::chrono::steady_clock::now() - t0;
