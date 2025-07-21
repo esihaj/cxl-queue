@@ -311,11 +311,11 @@ public:
             ++metrics.no_new_items;
             backoff_empty.pause(metrics.consumer_backoff_events,
                                 metrics.consumer_backoff_cycles_waited);
-            // if (debug)
-            //     std::osyncstream(std::cout)
-            //         << "[dequeue] epoch mismatch tail=" << tail_
-            //         << " exp=" << +expected_epoch
-            //         << " got=" << +out.meta.f.epoch << '\n';
+            if (debug)
+                std::osyncstream(std::cout)
+                    << "[dequeue] epoch mismatch tail=" << tail_
+                    << " exp=" << +expected_epoch
+                    << " got=" << +out.meta.f.epoch << '\n';
             return false;
         }
 
@@ -324,9 +324,9 @@ public:
             ++metrics.checksum_failed;
             backoff_checksum.pause(metrics.consumer_backoff_events,
                                    metrics.consumer_backoff_cycles_waited);
-            // if (debug)
-            //     std::osyncstream(std::cout)
-            //         << "[dequeue] checksum failed at tail=" << tail_ << '\n';
+            if (debug)
+                std::osyncstream(std::cout)
+                    << "[dequeue] checksum failed at tail=" << tail_ << '\n';
             return false;
         }
 
@@ -383,9 +383,9 @@ private:
         store_nt_u64(cxl_tail_, tail_);
         ++metrics.flush_tail;
 
-        // if (debug)
-        //     std::osyncstream(std::cout)
-        //         << "[flush_tail] WRITE cxl_tail=" << tail_ << '\n';
+        if (debug)
+            std::osyncstream(std::cout)
+                << "[flush_tail] WRITE cxl_tail=" << tail_ << '\n';
     }
 
     /* fixed data ---------------------------------------------------- */
