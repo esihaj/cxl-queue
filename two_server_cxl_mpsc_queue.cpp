@@ -195,9 +195,12 @@ int main(int argc, char* argv[]) {
             // The internal backoff in dequeue will prevent busy-spinning.
             if (q_consumer.dequeue(e, true)) {
                 consumed++;
-                // Log every successful dequeue operation.
-                // std::osyncstream(std::cout) << "[consumer] Successfully dequeued item #" << consumed 
-                //                             << " (rpc_id: " << e.meta.f.rpc_id << ").\n";
+                if (e.meta.f.rpc_id != static_cast<uint16_t>(consumed)) {
+                    std::osyncstream(std::cerr) << "[consumer] VERIFICATION FAILED! "
+                                                << "Expected rpc_id: " << consumed
+                                                << ", but got: " << e.meta.f.rpc_id << ".\n";
+                    exit(EXIT_FAILURE); // Exit immediately on data corruption.
+                }
             }
         }
         const auto t_cons = std::chrono::steady_clock::now() - t0;
