@@ -134,7 +134,7 @@ int main(int argc, char* argv[]) {
         e.meta.f.seal_index = -1;
         for (std::size_t i = 0; i < WARMUP; ++i) {
             e.meta.f.rpc_id = static_cast<uint16_t>(i);
-            while (!q_producer.enqueue(e)) { /* spin */ }
+            while (!q_producer.enqueue(e, true)) { /* spin */ }
         }
 
         // --- Handshake ---
@@ -152,18 +152,12 @@ int main(int argc, char* argv[]) {
         for (std::size_t i = WARMUP; i < ITER; ++i) {
             e.meta.f.rpc_id = static_cast<uint16_t>(i);
             
-            if (i > WARMUP && i % 100000 == 0) {
-                std::cout << "[producer] Attempting to enqueue item " << i << "...\n";
-            }
+            // Loop until enqueue succeeds, with debug logging enabled.
+            // The internal backoff in enqueue will prevent busy-spinning.
+            while (!q_producer.enqueue(e, true)) {}
 
-            uint64_t spin_count = 0;
-            while (!q_producer.enqueue(e)) {
-                spin_count++;
-                if (spin_count > 0 && spin_count % 10000000 == 0) { // Log every 10M failed attempts
-                    std::cout << "[producer] STUCK: Spun 10,000,000 times trying to enqueue item " << i << "\n";
-                }
-                cpu_relax_for_cycles(10);
-            }
+            // Log every successful enqueue operation.
+            std::osyncstream(std::cout) << "[producer] Successfully enqueued item " << i << ".\n";
         }
         const auto t_prod = std::chrono::steady_clock::now() - t0;
 
@@ -195,19 +189,15 @@ int main(int argc, char* argv[]) {
         // --- Timed phase ---
         Entry e{};
         std::size_t consumed = 0;
-        uint64_t attempts = 0;
         const auto t0 = std::chrono::steady_clock::now();
         while (consumed < ITER) {
-            attempts++;
-            if (q_consumer.dequeue(e)) {
+            // Attempt to dequeue with debug logging enabled.
+            // The internal backoff in dequeue will prevent busy-spinning.
+            if (q_consumer.dequeue(e, true)) {
                 consumed++;
-                if (consumed > 0 && consumed % 100000 == 0) {
-                    std::cout << "[consumer] Dequeued item " << consumed << ". Total attempts: " << attempts << "\n";
-                }
-            }
-
-            if (attempts > 0 && attempts % 10000000 == 0) { // Log every 10M attempts
-                std::cout << "[consumer] STUCK?: Made " << attempts << " dequeue attempts, but only consumed " << consumed << " items.\n";
+                // Log every successful dequeue operation.
+                std::osyncstream(std::cout) << "[consumer] Successfully dequeued item #" << consumed 
+                                            << " (rpc_id: " << e.meta.f.rpc_id << ").\n";
             }
         }
         const auto t_cons = std::chrono::steady_clock::now() - t0;
